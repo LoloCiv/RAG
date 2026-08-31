@@ -10,6 +10,7 @@ import logging
 
 import streamlit as st
 
+from app.agent import conversations
 from app.config import GOOGLE_DRIVE_FOLDER_ID, require_env
 from app.graph.neo4j_client import Neo4jGraphStore
 from app.ingestion import manifest, pipeline
@@ -41,12 +42,42 @@ def graph_stats() -> dict:
 #   en cada turno) -- se guarda el message.content completo del agente, no
 #   solo el texto, para no perder contexto de tool calls entre turnos.
 # display_messages: version simplificada solo para renderizar el chat
-#   (texto + fuentes + charts), separada de api_messages para no ensuciar
-#   la UI con el detalle interno de cada tool call.
+#   (texto + fuentes + charts + feedback), separada de api_messages para no
+#   ensuciar la UI con el detalle interno de cada tool call.
+# conversation_id: identifica el archivo en data/conversations/ donde se
+#   autoguarda esta conversacion despues de cada turno (Fase 5). Nueva al
+#   abrir la app por primera vez; cambia al elegir "+ Nueva conversación" o
+#   al retomar una del sidebar.
+if "conversation_id" not in st.session_state:
+    st.session_state.conversation_id = conversations.new_conversation_id()
 if "api_messages" not in st.session_state:
     st.session_state.api_messages = []
 if "display_messages" not in st.session_state:
     st.session_state.display_messages = []
+
+
+# --- Sidebar: conversaciones (Fase 5) ---
+with st.sidebar:
+    st.header("Conversaciones")
+
+    if st.button("+ Nueva conversación", use_container_width=True):
+        st.session_state.conversation_id = conversations.new_conversation_id()
+        st.session_state.api_messages = []
+        st.session_state.display_messages = []
+        st.rerun()
+
+    for _conv in conversations.list_conversations():
+        _label = _conv["title"] or "(sin título)"
+        _is_active = _conv["id"] == st.session_state.conversation_id
+        if st.button(("💬 " if _is_active else "") + _label, key=f"conv_{_conv['id']}", use_container_width=True):
+            _loaded = conversations.load_conversation(_conv["id"])
+            if _loaded:
+                st.session_state.conversation_id = _conv["id"]
+                st.session_state.api_messages = _loaded["api_messages"]
+                st.session_state.display_messages = _loaded["display_messages"]
+                st.rerun()
+
+    st.divider()
 
 
 # --- Sidebar: config + resync de Drive ---
@@ -126,13 +157,37 @@ def _render_sources(sources: list[dict]) -> None:
                 st.write(f"- {src['file_name']}")
 
 
-for msg in st.session_state.display_messages:
+_FEEDBACK_INDEX_TO_VALUE = {0: "down", 1: "up"}
+_FEEDBACK_VALUE_TO_INDEX = {"down": 0, "up": 1}
+
+
+def _render_feedback(msg: dict, key: str) -> None:
+    """Pulgar arriba/abajo (Fase 5) bajo una respuesta del asistente. Lee
+    y escribe directo sobre `msg` (un dict de
+    st.session_state.display_messages, por referencia) y autoguarda la
+    conversacion cuando el valor cambia -- st.feedback devuelve el valor
+    actual en cada rerun de Streamlit, comparar contra lo ya guardado
+    alcanza para saber si el click es nuevo.
+    """
+    current_index = _FEEDBACK_VALUE_TO_INDEX.get(msg.get("feedback"))
+    new_index = st.feedback("thumbs", key=key, default=current_index)
+    new_feedback = _FEEDBACK_INDEX_TO_VALUE.get(new_index)
+    if new_feedback != msg.get("feedback"):
+        msg["feedback"] = new_feedback
+        conversations.save_conversation(
+            st.session_state.conversation_id, st.session_state.api_messages, st.session_state.display_messages
+        )
+
+
+for _i, msg in enumerate(st.session_state.display_messages):
     with st.chat_message(msg["role"]):
         st.write(msg["text"])
         if msg.get("sources"):
             _render_sources(msg["sources"])
         for chart_path in msg.get("chart_paths", []):
             st.image(chart_path)
+        if msg["role"] == "assistant":
+            _render_feedback(msg, key=f"fb_{st.session_state.conversation_id}_{_i}")
 
 user_input = st.chat_input("Escribí tu pregunta...")
 
@@ -190,8 +245,18 @@ if user_input:
             for chart_path in chart_paths:
                 st.image(chart_path)
 
-            st.session_state.display_messages.append(
-                {"role": "assistant", "text": answer_text, "sources": sources, "chart_paths": chart_paths}
+            new_msg = {"role": "assistant", "text": answer_text, "sources": sources, "chart_paths": chart_paths}
+            st.session_state.display_messages.append(new_msg)
+            _render_feedback(
+                new_msg, key=f"fb_{st.session_state.conversation_id}_{len(st.session_state.display_messages) - 1}"
+            )
+
+            # Autoguardado (Fase 5): despues de cada turno completo, no en
+            # cada delta del streaming -- si el usuario cierra la pestana
+            # a mitad de una respuesta, se pierde ESE turno (no toda la
+            # conversacion, que ya estaba guardada del turno anterior).
+            conversations.save_conversation(
+                st.session_state.conversation_id, st.session_state.api_messages, st.session_state.display_messages
             )
         except Exception as e:
             progress.empty()

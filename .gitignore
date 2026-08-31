@@ -8,6 +8,8 @@ token.json
 /data/manifest.json
 /data/chart_outputs/*
 !/data/chart_outputs/.gitkeep
+/data/conversations/*
+!/data/conversations/.gitkeep
 
 # Python
 __pycache__/

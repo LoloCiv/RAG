@@ -97,7 +97,11 @@ CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_executio
 # Estado global para pasar las stores y acumular sources entre tool calls
 _store: vector_db.QdrantStorage | None = None
 _graph_store = None  # Neo4jGraphStore | None -- import perezoso, ver search_knowledge_base
-_accumulated_sources: list[str] = []
+# source_id -> file_name, en orden de PRIMERA aparicion (dict como set
+# ordenado, mismo patron que QdrantStorage.dedup_source_ids -- un set()
+# normal no garantiza orden en Python). Fase 3: la UI necesita file_name
+# para mostrar fuentes legibles en vez de "gdrive:abc123..." crudo.
+_accumulated_sources: dict[str, str] = {}
 # norm_names de las entidades ancla ya mostradas en el mapa DURANTE ESTE
 # TURNO. Cuando el mismo turno dispara 2+ search_knowledge_base en paralelo
 # sobre entidades solapadas (el SDK ya paraleliza esto), cada llamada
@@ -112,7 +116,7 @@ def _init_tools(store: vector_db.QdrantStorage, graph_store=None) -> None:
     global _store, _graph_store, _accumulated_sources, _mapa_anchors_shown
     _store = store
     _graph_store = graph_store
-    _accumulated_sources = []
+    _accumulated_sources = {}
     _mapa_anchors_shown = set()
 
 
@@ -219,9 +223,13 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     # lista correlacionada, preservando el orden de relevancia post-rerank.
     sources = vector_db.QdrantStorage.dedup_source_ids(chunks)
 
-    # Acumular sources para el contexto final del turno
+    # Acumular sources (con file_name, Fase 3) para el contexto final del
+    # turno. Reasignar una key existente no cambia su posicion en un dict
+    # de Python -- alcanza con recorrer chunks sin chequear membresia
+    # primero, el orden de primera aparicion queda solo con esto.
     global _accumulated_sources
-    _accumulated_sources.extend([s for s in sources if s not in _accumulated_sources])
+    for c in chunks:
+        _accumulated_sources[c["source_id"]] = c["file_name"]
 
     result = {
         "contexts": [c["text"] for c in chunks],

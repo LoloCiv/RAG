@@ -29,6 +29,21 @@ def sheet_tab_source_id(drive_file_id: str, tab_name: str) -> str:
     return f"gdrive:{drive_file_id}:{tab_name}"
 
 
+def drive_view_url(source_id: str) -> str | None:
+    """Link a Drive del archivo duenio de un source_id (Fase 3 del roadmap
+    de mejoras -- "fuentes legibles" en la UI). Un tab de sheet no tiene
+    URL propia: apunta al archivo (spreadsheet) completo, mismo
+    drive_file_id que cualquier otro tab de ese archivo.
+
+    None si source_id no tiene el prefijo "gdrive:" esperado -- defensivo,
+    para que la UI no muestre un link roto ante un formato inesperado.
+    """
+    if not source_id.startswith("gdrive:"):
+        return None
+    drive_file_id = source_id.split(":")[1]
+    return f"https://drive.google.com/file/d/{drive_file_id}/view"
+
+
 def text_chunk_point_id(source_id: str, chunk_index: int) -> str:
     """ID deterministico para un punto de tipo 'text_chunk' en Qdrant."""
     return str(uuid.uuid5(_NAMESPACE, f"{source_id}:chunk:{chunk_index}"))

@@ -88,6 +88,7 @@ from app.agent.tools import search_knowledge_base, get_source_table, CODE_EXECUT
 from app.agent import files
 from app.config import CLAUDE_MODEL, QDRANT_URL, QDRANT_COLLECTION, EMBED_DIM
 from app.graph.neo4j_client import Neo4jGraphStore
+from app.ingestion.source_id import drive_view_url
 from app.rag import vector_db
 
 logger = logging.getLogger(__name__)
@@ -119,18 +120,10 @@ def _tool_runner_kwargs(message_history: list[dict]) -> dict:
     }
 
 
-def run_turn(message_history: list[dict]) -> dict:
-    """Ejecutar un turno del agente con Claude.
-    
-    Args:
-        message_history: Historial de mensajes en formato Anthropic
-        
-    Returns:
-        dict con:
-            - response_content: Los bloques de contenido del último mensaje (para el historial)
-            - answer_text: Texto concatenado de la respuesta (para mostrar)
-            - sources: Lista de source_ids usados en búsquedas
-            - chart_paths: Paths locales de gráficos generados
+def _init_turn() -> tuple[vector_db.QdrantStorage, "Neo4jGraphStore | None"]:
+    """Arrancar los servicios y las tools para un turno nuevo. Compartido
+    entre run_turn() y run_turn_streaming() (Fase 3) -- mismo criterio de
+    degradacion del grafo en los dos casos.
     """
     store = vector_db.QdrantStorage(url=QDRANT_URL, collection=QDRANT_COLLECTION, dim=EMBED_DIM)
 
@@ -149,7 +142,58 @@ def run_turn(message_history: list[dict]) -> dict:
         graph_store = None
 
     _init_tools(store, graph_store)
+    return store, graph_store
 
+
+def _readable_sources() -> list[dict]:
+    """Arma la lista de fuentes legible para la UI (Fase 3) a partir de las
+    acumuladas en este turno. tools._accumulated_sources ya es un dict
+    ordenado source_id -> file_name en orden de relevancia (ver
+    app/agent/tools.py) -- alcanza con recorrerlo, sin dedupear de nuevo
+    (list(set(...)) ahi tiraba abajo justo ese orden, porque un set() de
+    Python no lo garantiza).
+    """
+    from app.agent import tools
+
+    return [
+        {"source_id": source_id, "file_name": file_name, "drive_url": drive_view_url(source_id)}
+        for source_id, file_name in tools._accumulated_sources.items()
+    ]
+
+
+def _build_result(client: anthropic.Anthropic, last_message) -> dict:
+    """Arma el dict de resultado final de un turno a partir del ultimo
+    mensaje del runner. Compartido entre run_turn() y run_turn_streaming().
+    """
+    if last_message is None:
+        return {"response_content": [], "answer_text": "", "sources": [], "chart_paths": []}
+
+    answer_text = _extract_text_from_content(last_message.content)
+    chart_paths = files.save_generated_files(client, last_message.content)
+
+    return {
+        "response_content": last_message.content,
+        "answer_text": answer_text,
+        "sources": _readable_sources(),
+        "chart_paths": chart_paths,
+    }
+
+
+def run_turn(message_history: list[dict]) -> dict:
+    """Ejecutar un turno del agente con Claude (no incremental -- ver
+    run_turn_streaming() para la version con streaming/progreso, Fase 3).
+
+    Args:
+        message_history: Historial de mensajes en formato Anthropic
+
+    Returns:
+        dict con:
+            - response_content: Los bloques de contenido del último mensaje (para el historial)
+            - answer_text: Texto concatenado de la respuesta (para mostrar)
+            - sources: Lista de {"source_id", "file_name", "drive_url"} usados en búsquedas
+            - chart_paths: Paths locales de gráficos generados
+    """
+    store, graph_store = _init_turn()
     client = anthropic.Anthropic()
 
     try:
@@ -165,26 +209,67 @@ def run_turn(message_history: list[dict]) -> dict:
         for message in runner:
             last_message = message
 
-        if last_message is None:
-            return {
-                "response_content": [],
-                "answer_text": "",
-                "sources": [],
-                "chart_paths": [],
-            }
+        return _build_result(client, last_message)
+    finally:
+        if graph_store is not None:
+            graph_store.close()
 
-        answer_text = _extract_text_from_content(last_message.content)
-        chart_paths = files.save_generated_files(client, last_message.content)
 
-        from app.agent import tools
-        accumulated_sources = list(set(tools._accumulated_sources))
+# Etiquetas legibles de progreso (Fase 3) para cuando Claude arranca una
+# tool call larga -- reemplazan el spinner mudo de "Pensando..." en
+# streamlit_app.py. "code_execution" es el name declarado en
+# CODE_EXECUTION_TOOL (app/agent/tools.py); cualquier tool no listada cae
+# al fallback generico, para no romper si se agrega una tool nueva y nadie
+# actualiza este dict.
+_TOOL_PROGRESS_LABELS = {
+    "search_knowledge_base": "🔍 Buscando en la base de conocimiento...",
+    "get_source_table": "📊 Trayendo datos exactos de la tabla...",
+    "code_execution": "🧮 Calculando...",
+}
 
-        return {
-            "response_content": last_message.content,
-            "answer_text": answer_text,
-            "sources": accumulated_sources,
-            "chart_paths": chart_paths,
-        }
+
+def _tool_progress_label(tool_name: str) -> str:
+    return _TOOL_PROGRESS_LABELS.get(tool_name, f"Usando {tool_name}...")
+
+
+def run_turn_streaming(message_history: list[dict]):
+    """Version con streaming de run_turn() (Fase 3) -- funcion HERMANA, no
+    reemplazo: mismos servicios/tools/runner por debajo (via _init_turn()/
+    _build_result()), pero devuelve un generador de eventos incrementales
+    en vez de esperar al mensaje final. Streamlit la usa con
+    st.write_stream(); benchmark_agent.py y el arnes de eval de la Fase 1
+    no dependen de run_turn en absoluto (ver docstring de
+    _tool_runner_kwargs), asi que no los toca.
+
+    Yields:
+        {"type": "text_delta", "text": str} -- fragmento de texto de la
+            respuesta, para mostrar incrementalmente.
+        {"type": "tool_start", "label": str} -- Claude arranco una tool
+            call (busqueda/tabla/calculo) -- indicacion de progreso en vez
+            de un spinner mudo.
+        {"type": "final", "result": dict} -- SIEMPRE el ultimo evento
+            emitido; mismo shape que devuelve run_turn().
+    """
+    store, graph_store = _init_turn()
+    client = anthropic.Anthropic()
+
+    try:
+        runner = client.beta.messages.tool_runner(stream=True, **_tool_runner_kwargs(message_history))
+
+        last_message = None
+        for stream in runner:
+            with stream:
+                for event in stream:
+                    if event.type == "content_block_delta" and getattr(event.delta, "type", None) == "text_delta":
+                        yield {"type": "text_delta", "text": event.delta.text}
+                    elif event.type == "content_block_start":
+                        block_type = getattr(event.content_block, "type", None)
+                        if block_type in ("tool_use", "server_tool_use"):
+                            tool_name = getattr(event.content_block, "name", block_type)
+                            yield {"type": "tool_start", "label": _tool_progress_label(tool_name)}
+                last_message = stream.get_final_message()
+
+        yield {"type": "final", "result": _build_result(client, last_message)}
     finally:
         if graph_store is not None:
             graph_store.close()

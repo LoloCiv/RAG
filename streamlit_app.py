@@ -107,13 +107,23 @@ with st.sidebar:
 st.title("📋 Agente de Eventos (POC)")
 st.caption("Preguntá sobre eventos, presupuestos y proveedores. Pedí gráficos si querés ver los números.")
 
+def _render_sources(sources: list[dict]) -> None:
+    """Fuentes legibles (Fase 3): nombre de archivo, con link a Drive
+    cuando drive_view_url() pudo resolverlo -- antes se listaba el
+    source_id crudo ("gdrive:1EgvjgF4md...")."""
+    with st.expander(f"Fuentes ({len(sources)})"):
+        for src in sources:
+            if src.get("drive_url"):
+                st.write(f"- [{src['file_name']}]({src['drive_url']})")
+            else:
+                st.write(f"- {src['file_name']}")
+
+
 for msg in st.session_state.display_messages:
     with st.chat_message(msg["role"]):
         st.write(msg["text"])
         if msg.get("sources"):
-            with st.expander(f"Fuentes ({len(msg['sources'])})"):
-                for src in msg["sources"]:
-                    st.write(f"- {src}")
+            _render_sources(msg["sources"])
         for chart_path in msg.get("chart_paths", []):
             st.image(chart_path)
 
@@ -127,40 +137,61 @@ if user_input:
     st.session_state.api_messages.append({"role": "user", "content": user_input})
 
     with st.chat_message("assistant"):
-        with st.spinner("Pensando..."):
-            try:
-                # Import diferido: si claude_agent.py todavia no esta
-                # implementado, el error aparece recien al usar el chat,
-                # no al arrancar la app (el resync de Drive puede probarse
-                # igual mientras tanto).
-                from app.agent import claude_agent
+        progress = st.empty()
+        progress.markdown("*Pensando...*")
+        final_result: dict = {}
 
-                result = claude_agent.run_turn(st.session_state.api_messages)
+        def _stream_answer_text():
+            # Generador puente entre run_turn_streaming() (eventos tipados
+            # text_delta/tool_start/final, Fase 3) y st.write_stream (que
+            # solo entiende chunks de texto para ir mostrando). Los
+            # tool_start actualizan el placeholder de progreso aparte, sin
+            # yieldearse -- st.write_stream no se entera de esas
+            # iteraciones. El evento "final" (siempre el ultimo) se guarda
+            # en la celda de afuera para el resto del render.
+            global final_result
+            for event in claude_agent.run_turn_streaming(st.session_state.api_messages):
+                if event["type"] == "text_delta":
+                    progress.empty()  # ya hay texto real, sacar "Pensando..."/tool_start
+                    yield event["text"]
+                elif event["type"] == "tool_start":
+                    progress.markdown(f"*{event['label']}*")
+                elif event["type"] == "final":
+                    final_result = event["result"]
 
-                st.session_state.api_messages.append(
-                    {"role": "assistant", "content": result["response_content"]}
-                )
+        try:
+            # Import diferido: si claude_agent.py todavia no esta
+            # implementado, el error aparece recien al usar el chat,
+            # no al arrancar la app (el resync de Drive puede probarse
+            # igual mientras tanto).
+            from app.agent import claude_agent
 
-                answer_text = result.get("answer_text", "")
-                sources = result.get("sources", [])
-                chart_paths = result.get("chart_paths", [])
+            st.write_stream(_stream_answer_text())
+            progress.empty()
 
-                st.write(answer_text)
-                if sources:
-                    with st.expander(f"Fuentes ({len(sources)})"):
-                        for src in sources:
-                            st.write(f"- {src}")
-                for chart_path in chart_paths:
-                    st.image(chart_path)
+            result = final_result
+            st.session_state.api_messages.append(
+                {"role": "assistant", "content": result["response_content"]}
+            )
 
-                st.session_state.display_messages.append(
-                    {"role": "assistant", "text": answer_text, "sources": sources, "chart_paths": chart_paths}
-                )
-            except Exception as e:
-                logger.exception("Fallo el turno del agente")
-                # No se agrega nada a api_messages en el error: si el
-                # usuario reintenta, el historial que se le manda a Claude
-                # queda consistente (sin un turno de asistente a medio
-                # completar).
-                st.session_state.api_messages.pop()  # saca el user turn que no se pudo responder
-                st.error(f"Ocurrió un error: {e}")
+            answer_text = result.get("answer_text", "")
+            sources = result.get("sources", [])
+            chart_paths = result.get("chart_paths", [])
+
+            if sources:
+                _render_sources(sources)
+            for chart_path in chart_paths:
+                st.image(chart_path)
+
+            st.session_state.display_messages.append(
+                {"role": "assistant", "text": answer_text, "sources": sources, "chart_paths": chart_paths}
+            )
+        except Exception as e:
+            progress.empty()
+            logger.exception("Fallo el turno del agente")
+            # No se agrega nada a api_messages en el error: si el
+            # usuario reintenta, el historial que se le manda a Claude
+            # queda consistente (sin un turno de asistente a medio
+            # completar).
+            st.session_state.api_messages.pop()  # saca el user turn que no se pudo responder
+            st.error(f"Ocurrió un error: {e}")

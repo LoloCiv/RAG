@@ -219,10 +219,19 @@ contenido real del corpus -- los datos, las citas y las conclusiones son
 correctos, y el agente es explícito sobre lo que no encuentra en vez de
 inventarlo.
 
-**Trabajo futuro identificado, no implementado en este sub-proyecto:**
-deduplicar el bloque de mapa entre búsquedas paralelas del mismo turno, o
-escalar `GRAPH_MAX_ANCHORS` según la amplitud de la pregunta, debería
-recuperar el caso "planificación" sin afectar "proveedor".
+**Actualización — implementado**: los dos ítems de arriba (dedup del mapa
+entre búsquedas paralelas del mismo turno, y un presupuesto real de tamaño
+en vez de topes de cantidad) se implementaron después de esta medición. Con
+`GRAPH_MAX_CHARS` (`app/config.py`) cortando anclas completas apenas el
+bloque supera ~400 tokens, más `_mapa_anchors_shown` (`app/agent/tools.py`)
+evitando repetir una ancla ya mostrada en el turno, remedido sin gastar API
+de Claude (solo Qdrant + Neo4j + embeddings): las dos búsquedas en paralelo
+de "planificación" pasaron de ~7.770 caracteres combinados (~1.942 tokens)
+a **2.475 caracteres (~618 tokens)**, una baja del 68%. "proveedor" no se
+vio afectado -- su mapa sigue dentro del presupuesto original. Falta
+confirmar el efecto final en `total_in`/costo con
+`python -m scripts.benchmark_agent planificacion` (gasta API real, no
+corrido todavía).
 
 Se evaluó (y se descartó) migrar el agente principal o la extracción de
 entidades a un modelo local (la máquina de desarrollo tiene una RTX 5060 de

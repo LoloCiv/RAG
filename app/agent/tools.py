@@ -10,15 +10,20 @@ de codigo de Anthropic (esta ultima no se implementa, se declara nomas).
 Busqueda semantica sobre la base de conocimiento (chunks de texto de PDFs/
 Docs/resumenes de filas de sheets). Pasos:
   1. embeddings.embed_texts([query])[0] para embeber la pregunta
-  2. store.search(query_vec, top_k, kind_filter="text_chunk") -- IMPORTANTE
-     el filtro "text_chunk": no queremos que aparezcan blobs de tabla (JSON
-     crudo) mezclados en resultados de busqueda semantica
-  3. devolver {"contexts": [...], "sources": [...]} -- ese es el contrato
-     JSON que ve Claude, sin cambios en la Fase 2. Lo que cambio (reranking,
-     Fase 2) es el shape INTERNO de QdrantStorage.search(): ahora devuelve
-     una lista correlacionada por chunk ([{"text","source_id","file_name",
-     "score"}, ...], sin dedupear), y esta funcion arma contexts/sources a
-     partir de ahi con QdrantStorage.dedup_source_ids().
+  2. store.search(query_vec, max(top_k, RERANK_CANDIDATES), kind_filter=
+     "text_chunk") -- IMPORTANTE el filtro "text_chunk": no queremos que
+     aparezcan blobs de tabla (JSON crudo) mezclados en resultados de
+     busqueda semantica. Se piden RERANK_CANDIDATES de mas (Fase 2) para
+     darle al rerank margen real para reordenar.
+  3. QdrantStorage.rerank_results(query, chunks, top_k) -- reordena por
+     relevancia real con Voyage y trunca a top_k. Si Voyage falla, degrada
+     con gracia al orden vectorial original (no rompe la busqueda).
+  4. devolver {"contexts": [...], "sources": [...]} -- ese es el contrato
+     JSON que ve Claude, sin cambios en la Fase 2. Lo que cambio es el
+     shape INTERNO de QdrantStorage.search(): ahora devuelve una lista
+     correlacionada por chunk ([{"text","source_id","file_name","score"},
+     ...], sin dedupear), y esta funcion arma contexts/sources a partir de
+     ahi con QdrantStorage.dedup_source_ids() despues del rerank.
 
 --------------------------------------------------------------------------
 2) get_source_table(source_id) -> dict
@@ -71,7 +76,14 @@ import logging
 from anthropic import beta_tool  # noqa: F401 -- lo vas a necesitar para decorar
 
 from app.rag import embeddings, vector_db  # noqa: F401
-from app.config import EMBED_DIM, GRAPH_MAX_ANCHORS, GRAPH_MAX_EDGES, QDRANT_COLLECTION, QDRANT_URL  # noqa: F401
+from app.config import (  # noqa: F401
+    EMBED_DIM,
+    GRAPH_MAX_ANCHORS,
+    GRAPH_MAX_EDGES,
+    QDRANT_COLLECTION,
+    QDRANT_URL,
+    RERANK_CANDIDATES,
+)
 from app.graph import retrieval
 
 logger = logging.getLogger(__name__)
@@ -191,11 +203,20 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     # que hay que decirle cual es cual para que el retrieval funcione bien.
     query_vector = embeddings.embed_texts([query], input_type="query")[0]
 
-    # Buscar solo chunks de texto, no blobs de tabla. Lista correlacionada
-    # por chunk (text/source_id/file_name/score, sin dedupear) desde la
-    # Fase 2 -- dedup_source_ids arma "sources" a nivel documento a partir
-    # de ahi, igual que antes hacia QdrantStorage.search() internamente.
-    chunks = store.search(query_vector, top_k=top_k, kind_filter="text_chunk")
+    # Buscar solo chunks de texto, no blobs de tabla. Pedimos mas
+    # candidatos que top_k (RERANK_CANDIDATES) para darle al reranker
+    # margen real para reordenar -- si solo trajeramos top_k, el rerank no
+    # podria subir un chunk que Qdrant puso justo afuera del corte.
+    candidate_k = max(top_k, RERANK_CANDIDATES)
+    chunks = store.search(query_vector, top_k=candidate_k, kind_filter="text_chunk")
+
+    # Reranking (Fase 2): reordena por relevancia real a la query y trunca
+    # a top_k. Degrada con gracia al orden vectorial original si Voyage
+    # falla -- ver QdrantStorage.rerank_results().
+    chunks = vector_db.QdrantStorage.rerank_results(query, chunks, top_k)
+
+    # dedup_source_ids arma "sources" a nivel documento a partir de la
+    # lista correlacionada, preservando el orden de relevancia post-rerank.
     sources = vector_db.QdrantStorage.dedup_source_ids(chunks)
 
     # Acumular sources para el contexto final del turno

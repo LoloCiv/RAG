@@ -92,6 +92,21 @@ GOOGLE_SCOPES = [
 # --- Limite de filas por tabla ingerida (ver sheet_loader.py) ---
 MAX_TABLE_ROWS = 2000
 
+# --- Reranking (Fase 2 del roadmap de mejoras, validado por
+# scripts/eval_retrieval.py: MRR base sin rerank = 0.90) ---
+# rerank-2.5-lite (no rerank-2.5 ni rerank-2/-lite, legacy): mismo criterio
+# que voyage-4-lite para embeddings -- esta en el tier gratuito de 200M
+# tokens/mes y es la generacion vigente (chequeado en docs.voyageai.com/
+# docs/pricing el 2026-08-31: rerank-2.5/-2.5-lite, instruction-following,
+# no existe "rerank-3"). rerank-2/-2-lite quedaron afuera de la franquicia
+# gratuita, igual que paso con voyage-large-2 para embeddings.
+RERANK_MODEL = os.getenv("RERANK_MODEL", "rerank-2.5-lite")
+# Cuantos candidatos traer de Qdrant antes de rerankear. 20 cubre con
+# margen los top_k tipicos (5-10) que pide search_knowledge_base sin
+# inflar el costo por busqueda -- el rerank cobra por token de TODOS los
+# documentos que se le pasan, no solo los que terminan en el top_k final.
+RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "20"))
+
 
 def require_env() -> list[str]:
     """Devuelve la lista de variables de entorno obligatorias que faltan.

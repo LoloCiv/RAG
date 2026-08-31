@@ -71,10 +71,15 @@ Pistas:
   partida logico, extendelo en vez de arrancar de cero.
 """
 
+import logging
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
 
 from app.config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL  # noqa: F401 -- los vas a necesitar
+from app.rag import embeddings
+
+logger = logging.getLogger(__name__)
 
 
 class QdrantStorage:
@@ -176,6 +181,36 @@ class QdrantStorage:
         for r in results:
             seen[r["source_id"]] = None
         return list(seen)
+
+    @staticmethod
+    def rerank_results(query: str, results: list[dict], top_k: int, rerank_fn=None) -> list[dict]:
+        """Reordena `results` (lista correlacionada de _points_to_results,
+        YA ordenada por score vectorial) con el reranker de Voyage sobre el
+        texto de cada chunk, y trunca a top_k.
+
+        Nunca propaga una excepcion: si el rerank falla (cuota, red, lo que
+        sea) degrada a los primeros top_k del orden vectorial original y
+        loguea -- mismo criterio que el grafo caido en _graph_context_for
+        (app/agent/tools.py). Un error de Voyage no debe poder romper la
+        busqueda semantica.
+
+        rerank_fn es inyectable (default: embeddings.rerank) para poder
+        testear el reorden y la degradacion sin hablarle a Voyage de
+        verdad -- firma (query, documents, top_k) -> indices de documents.
+        """
+        if not results:
+            return []
+
+        if rerank_fn is None:
+            rerank_fn = embeddings.rerank
+
+        try:
+            order = rerank_fn(query, [r["text"] for r in results], top_k)
+        except Exception:
+            logger.exception("Rerank fallo, degrado al orden vectorial original")
+            return results[:top_k]
+
+        return [results[i] for i in order]
 
     def get_by_source_id(self, source_id: str) -> dict | None:
         """Obtener el payload del punto kind='table_data' para un source_id.

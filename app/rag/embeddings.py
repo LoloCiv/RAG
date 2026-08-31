@@ -25,7 +25,7 @@ Pistas:
 
 import voyageai
 
-from app.config import EMBED_DIM, EMBED_MODEL, VOYAGE_API_KEY
+from app.config import EMBED_DIM, EMBED_MODEL, RERANK_MODEL, VOYAGE_API_KEY
 
 _client = None
 
@@ -68,3 +68,27 @@ def embed_texts(texts: list[str], input_type: str = "document") -> list[list[flo
 
     # Retornar los vectores en el mismo orden que los textos
     return response.embeddings
+
+
+def rerank(query: str, documents: list[str], top_k: int) -> list[int]:
+    """Reordenar `documents` por relevancia a `query` con el reranker de
+    Voyage AI (RERANK_MODEL). Devuelve los INDICES de `documents` en el
+    nuevo orden (mas relevante primero), como mucho top_k.
+
+    No dedupea ni mapea de vuelta a metadata (source_id, file_name, etc.)
+    -- eso es responsabilidad de QdrantStorage.rerank_results(), que
+    tambien maneja la degradacion con gracia si esta funcion falla (cuota,
+    red). Firma deliberadamente simetrica a embed_texts: lista de texto
+    plano adentro, sin acoplarse al shape de resultado de Qdrant.
+    """
+    if not documents:
+        return []
+
+    client = _get_client()
+    response = client.rerank(
+        query=query,
+        documents=documents,
+        model=RERANK_MODEL,
+        top_k=top_k,
+    )
+    return [r.index for r in response.results]

@@ -11,9 +11,10 @@ Metricas por pregunta:
   plan). 0 si ninguno aparecio.
 
 Uso:
-    python -m scripts.eval_retrieval                  # todo el golden set
+    python -m scripts.eval_retrieval                  # todo el golden set (con reranking, Fase 2)
     python -m scripts.eval_retrieval --top-k 8         # top_k distinto
     python -m scripts.eval_retrieval --only fernandez_lopez_cronograma_pagos
+    python -m scripts.eval_retrieval --no-rerank       # solo busqueda vectorial, para comparar contra el MRR base de la Fase 1 (0.90)
 
 Requiere Qdrant vivo y VOYAGE_API_KEY. NO gasta Claude. Correr dos veces
 seguidas sin cambiar el corpus tiene que dar el mismo resultado -- si no,
@@ -39,7 +40,7 @@ import json
 import sys
 from pathlib import Path
 
-from app.config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL
+from app.config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL, RERANK_CANDIDATES
 from app.ingestion import manifest as manifest_module
 from app.rag import embeddings, vector_db
 
@@ -140,16 +141,29 @@ def format_report(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def evaluate_question(question: dict, manifest: dict, store: vector_db.QdrantStorage, top_k: int) -> dict:
+def evaluate_question(
+    question: dict, manifest: dict, store: vector_db.QdrantStorage, top_k: int, rerank: bool = True
+) -> dict:
     """Corre UNA pregunta del golden set contra Qdrant real (embedding de
     la pregunta + busqueda), sin Claude. Depende de servicios vivos -- no
     se testea con pytest (mismo criterio que run_question en
-    scripts/benchmark_agent.py)."""
+    scripts/benchmark_agent.py).
+
+    rerank=True (default) sigue EXACTAMENTE el mismo camino que
+    search_knowledge_base (app/agent/tools.py): pide RERANK_CANDIDATES
+    candidatos y los reordena con QdrantStorage.rerank_results() antes de
+    medir. rerank=False mide la busqueda vectorial sola (--no-rerank en la
+    CLI) -- sirve para reproducir el numero base de la Fase 1 (MRR=0.90) y
+    comparar antes/vs/despues sin tener que volver a un commit viejo.
+    """
     expected = resolve_expected_source_ids(question["expected_files"], manifest)
     query_vector = embeddings.embed_texts([question["question"]], input_type="query")[0]
-    # Lista correlacionada por chunk desde la Fase 2 (reranking) -- dedupear
-    # a "sources" a nivel documento, igual que search_knowledge_base.
-    chunks = store.search(query_vector, top_k=top_k, kind_filter="text_chunk")
+    candidate_k = max(top_k, RERANK_CANDIDATES) if rerank else top_k
+    chunks = store.search(query_vector, top_k=candidate_k, kind_filter="text_chunk")
+    if rerank:
+        chunks = vector_db.QdrantStorage.rerank_results(question["question"], chunks, top_k)
+    # Lista correlacionada por chunk desde la Fase 2 -- dedupear a
+    # "sources" a nivel documento, igual que search_knowledge_base.
     retrieved = vector_db.QdrantStorage.dedup_source_ids(chunks)
     return {
         "id": question["id"],
@@ -162,6 +176,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K, help=f"default {DEFAULT_TOP_K}")
     parser.add_argument("--only", type=str, default=None, help="id de una sola pregunta del golden set")
+    parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="medir solo la busqueda vectorial (sin reranking) -- para comparar contra el numero base de la Fase 1",
+    )
     args = parser.parse_args()
 
     golden_set = load_golden_set()
@@ -182,7 +201,7 @@ def main() -> None:
     results = []
     for i, q in enumerate(golden_set, start=1):
         print(f"[{i}/{len(golden_set)}] {q['id']}...", end=" ", flush=True)
-        r = evaluate_question(q, manifest, store, args.top_k)
+        r = evaluate_question(q, manifest, store, args.top_k, rerank=not args.no_rerank)
         print(f"recall={r['recall']:.2f} rr={r['rr']:.2f}", flush=True)
         results.append(r)
 

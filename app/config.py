@@ -55,6 +55,17 @@ GRAPH_MAX_ANCHORS = int(os.getenv("GRAPH_MAX_ANCHORS", "5"))
 # mantiene el bloque en el orden de los 200-400 tokens que justifica esta
 # palanca (contra los ~4.000 que cuesta una busqueda de chunks).
 GRAPH_MAX_EDGES = int(os.getenv("GRAPH_MAX_EDGES", "40"))
+# Techo de TAMANO real del bloque de mapa, en caracteres. GRAPH_MAX_ANCHORS/
+# GRAPH_MAX_EDGES cuentan elementos, no tokens, y por eso no escalan: 11
+# aristas de una sola ancla entran comodas en el presupuesto de 200-400
+# tokens del spec, pero una pregunta amplia que resuelve 5 anclas
+# simultaneas -- cada una con sus propias aristas -- se va a ~970 tokens
+# aunque respete los mismos topes de cantidad (medido contra el corpus
+# real). Este es el tope que de verdad gobierna el tamano del texto:
+# format_graph_context corta anclas ENTERAS (nunca a la mitad) apenas se
+# excede. 1600 ~= 400 tokens a razon de ~4 chars/token -- una regla de dedo
+# a proposito, no vale la pena una llamada de tokenizer por busqueda.
+GRAPH_MAX_CHARS = int(os.getenv("GRAPH_MAX_CHARS", "1600"))
 
 # --- Modelos ---
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")

@@ -7,7 +7,7 @@ sub-proyecto 1: es donde vive el presupuesto de tokens de esta palanca, y
 se testea sin Neo4j vivo.
 """
 
-from app.config import GRAPH_MAX_ANCHORS, GRAPH_MAX_EDGES
+from app.config import GRAPH_MAX_ANCHORS, GRAPH_MAX_CHARS, GRAPH_MAX_EDGES
 
 
 def format_graph_context(
@@ -15,6 +15,7 @@ def format_graph_context(
     edges: list[dict],
     max_anchors: int = GRAPH_MAX_ANCHORS,
     max_edges: int = GRAPH_MAX_EDGES,
+    max_chars: int = GRAPH_MAX_CHARS,
 ) -> str:
     """anchors y edges vienen YA ordenados por relevancia (Neo4j hace el
     ORDER BY) -- esta funcion no reordena, solo recorta y formatea.
@@ -41,7 +42,8 @@ def format_graph_context(
     emitted_edge_indices: set[int] = set()
     for anchor in capped_anchors:
         types = "/".join(anchor.get("types") or [])
-        lines.append(f"{anchor['name']} [{types}] ({anchor['doc_count']} docs)")
+        anchor_lines = [f"{anchor['name']} [{types}] ({anchor['doc_count']} docs)"]
+        pending_edge_indices: list[int] = []
 
         for idx, edge in enumerate(capped_edges):
             if idx in emitted_edge_indices:
@@ -51,13 +53,28 @@ def format_graph_context(
             ref = f" ({source_ids[0]})" if source_ids else ""
 
             if edge["source"] == anchor["name"]:
-                lines.append(f"  -{edge['rel_type']}-> {edge['target']}{ref}")
-                emitted_edge_indices.add(idx)
+                anchor_lines.append(f"  -{edge['rel_type']}-> {edge['target']}{ref}")
+                pending_edge_indices.append(idx)
             elif edge["target"] == anchor["name"]:
-                lines.append(f"  <-{edge['rel_type']}- {edge['source']}{ref}")
-                emitted_edge_indices.add(idx)
+                anchor_lines.append(f"  <-{edge['rel_type']}- {edge['source']}{ref}")
+                pending_edge_indices.append(idx)
             # Ni source ni target es esta ancla: no corresponde bajo este
             # bloque (podria corresponder bajo otra ancla, se evalua en la
             # siguiente vuelta del for externo).
+
+        # Presupuesto real de tamano (GRAPH_MAX_CHARS): una pregunta amplia
+        # puede resolver varias anclas, cada una dentro de max_anchors/
+        # max_edges, pero JUNTAS superar el presupuesto de tokens que
+        # justifica esta palanca. Se corta por ancla ENTERA -- header + sus
+        # aristas van todos juntos o ninguno -- nunca a la mitad. La
+        # primera ancla siempre se muestra igual, aunque sola supere el
+        # presupuesto: nunca corresponde devolver vacio habiendo anclas
+        # relevantes que mostrar.
+        candidate_len = sum(len(l) + 1 for l in lines) + sum(len(l) + 1 for l in anchor_lines)
+        if lines and candidate_len > max_chars:
+            break
+
+        lines.extend(anchor_lines)
+        emitted_edge_indices.update(pending_edge_indices)
 
     return "\n".join(lines)

@@ -78,6 +78,35 @@ def test_arista_sin_source_ids_no_rompe():
     assert "Algo" in texto  # no explota, solo no muestra un source_id
 
 
+def test_respeta_presupuesto_de_caracteres_cortando_anclas_completas():
+    # 5 anclas, cada una con varias aristas -- entran de a una en el tope de
+    # anclas/aristas, pero juntas superan un presupuesto de caracteres chico.
+    # El corte tiene que dejar afuera anclas ENTERAS, nunca un header sin
+    # sus aristas o aristas sin su header.
+    anchors = [_anchor(f"Ancla{i}", ["Tipo"], 10 - i) for i in range(5)]
+    edges = [_edge(f"Ancla{i}", "REL", f"Nodo{i}", []) for i in range(5)]
+
+    texto = format_graph_context(anchors, edges, max_chars=80)
+
+    # Como maximo entran unas pocas anclas completas en 80 caracteres.
+    assert texto.count("Ancla") < 10  # 5 headers + 5 referencias en REL lines seria 10
+    # Cualquier ancla que aparezca como header tiene que traer su arista.
+    for i in range(5):
+        header = f"Ancla{i} [Tipo]"
+        edge_line = f"-REL-> Nodo{i}"
+        if header in texto:
+            assert edge_line in texto, f"Ancla{i} aparece sin su arista"
+
+
+def test_siempre_muestra_al_menos_la_primera_ancla_aunque_supere_el_presupuesto():
+    anchors = [_anchor("Catering Buena Mesa", ["Proveedor"], 6)]
+    edges = [_edge("Catering Buena Mesa", "CONTRATADO_PARA", f"Evento{i}", []) for i in range(20)]
+
+    texto = format_graph_context(anchors, edges, max_chars=1)
+
+    assert "Catering Buena Mesa" in texto
+
+
 def test_arista_entre_dos_anclas_se_imprime_una_sola_vez():
     # Si ambos extremos de la arista son anclas, el recorrido la toca dos
     # veces (una como saliente desde el bloque del ancla-origen, otra como

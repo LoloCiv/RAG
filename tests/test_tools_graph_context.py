@@ -6,8 +6,23 @@ funcionando aunque Neo4j este caido)."""
 
 import json
 
+import pytest
+
 import app.agent.tools as tools_module
 from app.agent.tools import _graph_context_for, _init_tools, search_knowledge_base
+
+
+@pytest.fixture(autouse=True)
+def _reset_mapa_anchors_shown():
+    """_graph_context_for ahora dedupea anclas ya mostradas EN EL MISMO
+    TURNO via el estado de modulo _mapa_anchors_shown. Los tests de este
+    archivo llaman _graph_context_for directo (sin pasar por _init_tools,
+    que es lo que resetea ese estado en produccion) -- sin este reset,
+    un test que corre despues de otro heredaria anclas "ya mostradas" que
+    no tienen nada que ver con el, y el orden de ejecucion de pytest
+    dejaria de ser irrelevante."""
+    tools_module._mapa_anchors_shown = set()
+    yield
 
 
 class _FakeGraphStore:
@@ -64,6 +79,92 @@ def test_fallo_al_buscar_vecindario_no_rompe_y_devuelve_vacio():
         raise_on="neighborhood",
     )
     assert _graph_context_for(store, ["gdrive:abc"]) == ""
+
+
+def test_no_repite_anclas_ya_mostradas_en_el_mismo_turno():
+    # Cuando el mismo turno dispara 2+ search_knowledge_base en paralelo
+    # sobre entidades solapadas, la segunda llamada no debe repetir el mapa
+    # de la primera -- sin ganancia de informacion, puro gasto de tokens.
+    store = _FakeGraphStore(
+        anchors=[{"name": "Catering Buena Mesa", "norm_name": "catering buena mesa", "types": ["Proveedor"], "doc_count": 6}],
+        edges=[{"source": "Catering Buena Mesa", "rel_type": "CONTRATADO_PARA", "target": "Casamiento Perez-Gomez", "source_ids": ["gdrive:abc"]}],
+    )
+
+    primera = _graph_context_for(store, ["gdrive:abc"])
+    segunda = _graph_context_for(store, ["gdrive:abc"])
+
+    assert "Catering Buena Mesa" in primera
+    assert segunda == ""
+
+
+def test_anclas_parcialmente_solapadas_muestra_solo_las_nuevas():
+    store = _FakeGraphStore(
+        anchors=[
+            {"name": "Catering Buena Mesa", "norm_name": "catering buena mesa", "types": ["Proveedor"], "doc_count": 6},
+            {"name": "Quinta El Ombu", "norm_name": "quinta el ombu", "types": ["Locacion"], "doc_count": 5},
+        ],
+        edges=[],
+    )
+
+    _graph_context_for(store, ["gdrive:abc"])  # muestra ambas anclas, quedan marcadas
+
+    # Segunda llamada: mismo store (mismas dos anclas candidatas), pero ya
+    # se mostraron ambas -- no debe quedar nada nuevo que aportar.
+    segunda = _graph_context_for(store, ["gdrive:abc"])
+    assert segunda == ""
+
+    # Un graph_store distinto con una ancla nueva sumada a una ya vista:
+    # solo la nueva debe aparecer.
+    store_con_novedad = _FakeGraphStore(
+        anchors=[
+            {"name": "Catering Buena Mesa", "norm_name": "catering buena mesa", "types": ["Proveedor"], "doc_count": 6},
+            {"name": "Sabores del Plata", "norm_name": "sabores del plata", "types": ["Proveedor"], "doc_count": 6},
+        ],
+        edges=[],
+    )
+    tercera = _graph_context_for(store_con_novedad, ["gdrive:def"])
+    assert "Catering Buena Mesa" not in tercera
+    assert "Sabores del Plata" in tercera
+
+
+def test_dedupe_no_marca_como_mostrada_una_ancla_que_el_presupuesto_de_caracteres_corto(monkeypatch):
+    # format_graph_context (Cambio 1, GRAPH_MAX_CHARS) puede cortar una
+    # ancla entera si el bloque supera el presupuesto -- esa ancla nunca
+    # llego al texto que ve Claude, asi que NO debe marcarse como "ya
+    # mostrada": una llamada posterior con menos competencia por espacio
+    # todavia tiene que poder mostrarla.
+    anchor_a = {"name": "Ancla A", "norm_name": "ancla a", "types": ["Tipo"], "doc_count": 5}
+    anchor_b = {"name": "Ancla B", "norm_name": "ancla b", "types": ["Tipo"], "doc_count": 4}
+    store = _FakeGraphStore(anchors=[anchor_a, anchor_b], edges=[])
+
+    # Simular que el presupuesto de caracteres corto la segunda ancla: el
+    # texto que devuelve format_graph_context solo trae el header de A.
+    monkeypatch.setattr(
+        tools_module.retrieval,
+        "format_graph_context",
+        lambda anchors, edges: "Ancla A [Tipo] (5 docs)",
+    )
+
+    _graph_context_for(store, ["gdrive:abc"])
+
+    assert "ancla a" in tools_module._mapa_anchors_shown
+    assert "ancla b" not in tools_module._mapa_anchors_shown
+
+
+def test_init_tools_resetea_el_estado_de_anclas_mostradas():
+    store = _FakeGraphStore(
+        anchors=[{"name": "Catering Buena Mesa", "norm_name": "catering buena mesa", "types": ["Proveedor"], "doc_count": 6}],
+        edges=[],
+    )
+
+    _graph_context_for(store, ["gdrive:abc"])
+    assert _graph_context_for(store, ["gdrive:abc"]) == ""  # ya mostrada, mismo turno
+
+    _init_tools(_FakeVectorStore({}), None)  # nuevo turno
+
+    # Turno nuevo: la misma ancla vuelve a ser "nueva".
+    otra_vez = _graph_context_for(store, ["gdrive:abc"])
+    assert "Catering Buena Mesa" in otra_vez
 
 
 class _FakeVectorStore:

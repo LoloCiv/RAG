@@ -82,14 +82,22 @@ CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_executio
 _store: vector_db.QdrantStorage | None = None
 _graph_store = None  # Neo4jGraphStore | None -- import perezoso, ver search_knowledge_base
 _accumulated_sources: list[str] = []
+# norm_names de las entidades ancla ya mostradas en el mapa DURANTE ESTE
+# TURNO. Cuando el mismo turno dispara 2+ search_knowledge_base en paralelo
+# sobre entidades solapadas (el SDK ya paraleliza esto), cada llamada
+# arrastraba su propia copia casi identica del mapa -- puro gasto de
+# tokens, sin informacion nueva. Se resetea en cada _init_tools (turno
+# nuevo, mapa desde cero), igual que _accumulated_sources.
+_mapa_anchors_shown: set[str] = set()
 
 
 def _init_tools(store: vector_db.QdrantStorage, graph_store=None) -> None:
     """Inicializar los tools con las stores y resetear el estado."""
-    global _store, _graph_store, _accumulated_sources
+    global _store, _graph_store, _accumulated_sources, _mapa_anchors_shown
     _store = store
     _graph_store = graph_store
     _accumulated_sources = []
+    _mapa_anchors_shown = set()
 
 
 def _get_store() -> vector_db.QdrantStorage:
@@ -107,19 +115,36 @@ def _graph_context_for(graph_store, source_ids: list[str]) -> str:
     que ya devolvio Qdrant. Aislada de search_knowledge_base para poder
     testearla con un graph_store falso.
 
+    Dedupe entre llamadas del mismo turno: si una ancla ya se mostro en una
+    busqueda anterior de este turno (_mapa_anchors_shown), no se repite --
+    si no queda ninguna ancla nueva que aportar, devuelve "" (mismo
+    significado que "sin contexto de grafo" que ya maneja el system
+    prompt). Ojo: format_graph_context puede a su vez cortar alguna de
+    estas anclas por presupuesto de caracteres (GRAPH_MAX_CHARS) -- una
+    ancla que se pidio pero no llego a aparecer en el texto final NO debe
+    marcarse como mostrada, para que una llamada posterior con menos
+    competencia por espacio todavia pueda mostrarla. Por eso se marca
+    comparando contra el texto devuelto (via retrieval.anchor_header), no
+    contra la lista de anclas que se le paso a format_graph_context.
+
     Nunca propaga una excepcion: un fallo de Neo4j aca degrada a "sin mapa",
     no rompe la busqueda semantica -- mismo criterio que _sync_graph_safe
     en app/ingestion/pipeline.py.
     """
+    global _mapa_anchors_shown
     if graph_store is None or not source_ids:
         return ""
     try:
         anchors = graph_store.anchors_by_source_ids(source_ids, limit=GRAPH_MAX_ANCHORS)
+        anchors = [a for a in anchors if a["norm_name"] not in _mapa_anchors_shown]
         if not anchors:
             return ""
         norm_names = [a["norm_name"] for a in anchors]
         edges = graph_store.neighborhood(norm_names, limit=GRAPH_MAX_EDGES)
-        return retrieval.format_graph_context(anchors, edges)
+        text = retrieval.format_graph_context(anchors, edges)
+        shown_now = {a["norm_name"] for a in anchors if retrieval.anchor_header(a) in text}
+        _mapa_anchors_shown.update(shown_now)
+        return text
     except Exception:
         logger.exception("No se pudo enriquecer con el grafo, sigo solo con busqueda vectorial")
         return ""

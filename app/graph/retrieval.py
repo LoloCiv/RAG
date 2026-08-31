@@ -10,6 +10,16 @@ se testea sin Neo4j vivo.
 from app.config import GRAPH_MAX_ANCHORS, GRAPH_MAX_CHARS, GRAPH_MAX_EDGES
 
 
+def anchor_header(anchor: dict) -> str:
+    """Header de una ancla tal cual lo arma format_graph_context. Expuesta
+    (sin guion bajo) porque app/agent/tools.py la necesita para saber, tras
+    un recorte por GRAPH_MAX_CHARS, que anclas entraron REALMENTE en el
+    texto -- una sola fuente de verdad para el formato del header en vez de
+    duplicarlo en dos modulos."""
+    types = "/".join(anchor.get("types") or [])
+    return f"{anchor['name']} [{types}] ({anchor['doc_count']} docs)"
+
+
 def format_graph_context(
     anchors: list[dict],
     edges: list[dict],
@@ -41,8 +51,7 @@ def format_graph_context(
     # emitted_edge_indices para que las anclas siguientes la salteen.
     emitted_edge_indices: set[int] = set()
     for anchor in capped_anchors:
-        types = "/".join(anchor.get("types") or [])
-        anchor_lines = [f"{anchor['name']} [{types}] ({anchor['doc_count']} docs)"]
+        anchor_lines = [anchor_header(anchor)]
         pending_edge_indices: list[int] = []
 
         for idx, edge in enumerate(capped_edges):

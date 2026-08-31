@@ -1,0 +1,86 @@
+[
+  {
+    "id": "fernandez_lopez_cronograma_pagos",
+    "question": "¿Qué cronograma de pagos especial se aprobó para el casamiento Fernandez-Lopez?",
+    "expected_files": ["Contrato_Notas_Fernandez_Lopez"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "fernandez_lopez_catering_pendiente",
+    "question": "¿Qué proveedor de catering está en evaluación para el casamiento Fernandez-Lopez?",
+    "expected_files": ["Contrato_Notas_Fernandez_Lopez"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "perez_gomez_resena_5_estrellas",
+    "question": "¿Qué proveedores recibieron una reseña de 5 estrellas en el casamiento Perez-Gomez?",
+    "expected_files": ["Resumen_Evento_Casamiento_Perez_Gomez.pdf"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "roberto_sanchez_ahorro_dj",
+    "question": "¿Por qué el Cumpleanos 50 de Roberto Sanchez gastó menos de lo presupuestado?",
+    "expected_files": ["Reporte_Post_Evento_Roberto_Sanchez"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "roberto_sanchez_leccion_aprendida",
+    "question": "¿Qué lección aprendida dejó el equipo de coordinación después del Cumpleanos 50 de Roberto Sanchez?",
+    "expected_files": ["Reporte_Post_Evento_Roberto_Sanchez"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "rh_summit_riesgos",
+    "question": "¿Qué riesgos se identificaron para el RH Summit 2026?",
+    "expected_files": ["Brief_RH_Summit_2026.pdf"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "technova_requerimientos_especiales",
+    "question": "¿Qué requerimientos especiales de iluminación y seguridad pidió el cliente para el Lanzamiento TechNova X1?",
+    "expected_files": ["Brief_Lanzamiento_TechNova_X1.pdf"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "politicas_cancelacion",
+    "question": "¿Cuál es la política de cancelación y retención de seña de Eventos Aurora?",
+    "expected_files": ["Politicas_Generales_Eventos_Aurora.pdf"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "xv_sofia_martinez_decoracion",
+    "question": "¿Qué elemento de decoración de utilería se usó en la fiesta de 15 de Sofia Martinez?",
+    "expected_files": ["Brief_XV_Sofia_Martinez.pdf"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "flores_bouquet_vs_flores_del_sur",
+    "question": "Entre Flores Bouquet y Flores del Sur, ¿cuál recomienda priorizar el equipo de coordinación y por qué?",
+    "expected_files": ["Manual_Proveedores_Preferidos"],
+    "tags": ["single-file"]
+  },
+  {
+    "id": "perez_gomez_presupuesto_excedido",
+    "question": "¿Cuánto se excedió el presupuesto del casamiento Perez-Gomez y por qué?",
+    "expected_files": ["Presupuesto_Proveedores.xlsx", "Resumen_Evento_Casamiento_Perez_Gomez.pdf"],
+    "tags": ["multi-file", "numeric"]
+  },
+  {
+    "id": "catering_preferido_bodas",
+    "question": "¿Cuál es el proveedor de catering preferido para bodas, y en qué eventos trabajó según el registro de contrataciones?",
+    "expected_files": ["Manual_Proveedores_Preferidos", "Presupuesto_Proveedores.xlsx"],
+    "tags": ["multi-file"]
+  },
+  {
+    "id": "technova_gasto_a_la_fecha",
+    "question": "¿Cuánto se gastó hasta ahora en el Lanzamiento TechNova X1?",
+    "expected_files": ["Brief_Lanzamiento_TechNova_X1.pdf", "Presupuesto_Proveedores.xlsx"],
+    "tags": ["multi-file", "numeric"]
+  },
+  {
+    "id": "roberto_sanchez_invitados_locacion",
+    "question": "¿Cuántos invitados tuvo el Cumpleanos 50 de Roberto Sanchez y en qué locación se hizo?",
+    "expected_files": ["Calendario_Eventos.xlsx", "Reporte_Post_Evento_Roberto_Sanchez"],
+    "tags": ["multi-file", "numeric"]
+  }
+]

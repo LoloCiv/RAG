@@ -62,11 +62,15 @@ Pistas:
 """
 
 import json
+import logging
 
 from anthropic import beta_tool  # noqa: F401 -- lo vas a necesitar para decorar
 
 from app.rag import embeddings, vector_db  # noqa: F401
-from app.config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL  # noqa: F401
+from app.config import EMBED_DIM, GRAPH_MAX_ANCHORS, GRAPH_MAX_EDGES, QDRANT_COLLECTION, QDRANT_URL  # noqa: F401
+from app.graph import retrieval
+
+logger = logging.getLogger(__name__)
 
 CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
 
@@ -94,6 +98,29 @@ def _get_store() -> vector_db.QdrantStorage:
     return _store
 
 
+def _graph_context_for(graph_store, source_ids: list[str]) -> str:
+    """Arma el mapa de grafo para una busqueda, a partir de los source_ids
+    que ya devolvio Qdrant. Aislada de search_knowledge_base para poder
+    testearla con un graph_store falso.
+
+    Nunca propaga una excepcion: un fallo de Neo4j aca degrada a "sin mapa",
+    no rompe la busqueda semantica -- mismo criterio que _sync_graph_safe
+    en app/ingestion/pipeline.py.
+    """
+    if graph_store is None or not source_ids:
+        return ""
+    try:
+        anchors = graph_store.anchors_by_source_ids(source_ids, limit=GRAPH_MAX_ANCHORS)
+        if not anchors:
+            return ""
+        norm_names = [a["norm_name"] for a in anchors]
+        edges = graph_store.neighborhood(norm_names, limit=GRAPH_MAX_EDGES)
+        return retrieval.format_graph_context(anchors, edges)
+    except Exception:
+        logger.exception("No se pudo enriquecer con el grafo, sigo solo con busqueda vectorial")
+        return ""
+
+
 # OJO: @beta_tool exige que la funcion devuelva str (o una lista de content
 # blocks) -- BetaFunctionToolResultType = Union[str, Iterable[BetaContent]]
 # en el SDK (anthropic/lib/tools/_beta_functions.py). El tool_runner mete el
@@ -109,16 +136,20 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     """Buscar información relevante en la base de conocimiento.
 
     Realiza una búsqueda semántica sobre PDFs, Google Docs y planillas
-    ingestionados. Devuelve los fragmentos de texto más relevantes y sus
-    fuentes.
+    ingestionados. Devuelve los fragmentos de texto más relevantes, sus
+    fuentes, y un mapa del grafo de conocimiento con las entidades y
+    relaciones que conectan esos documentos (campo "mapa" -- vacío si no
+    hay contexto de grafo disponible).
 
     Args:
         query: La pregunta o término de búsqueda
         top_k: Cantidad máxima de resultados a devolver (default 5)
 
     Returns:
-        JSON con "contexts" (lista de fragmentos de texto relevantes) y
-        "sources" (lista de source_ids con los documentos/planillas encontrados)
+        JSON con "contexts" (fragmentos de texto), "sources" (source_ids) y
+        "mapa" (texto con entidades y relaciones del grafo relacionadas a
+        esos documentos -- usalo para saber que otros eventos/proveedores
+        estan conectados sin tener que buscarlos por separado)
     """
     store = _get_store()
 
@@ -133,6 +164,8 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     # Acumular sources para el contexto final del turno
     global _accumulated_sources
     _accumulated_sources.extend([s for s in result["sources"] if s not in _accumulated_sources])
+
+    result["mapa"] = _graph_context_for(_graph_store, result["sources"])
 
     return json.dumps(result, ensure_ascii=False)
 

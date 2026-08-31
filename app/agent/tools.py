@@ -37,7 +37,12 @@ No es una funcion Python: es un dict que se declara en la lista de tools
 del tool_runner tal cual, Anthropic la corre en su propia infraestructura
 (ya tiene pandas/matplotlib instalados). Se usa asi, en claude_agent.py:
 
-    CODE_EXECUTION_TOOL = {"type": "code_execution_20260521", "name": "code_execution"}
+    CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
+
+get_source_table esta decorada con @beta_tool(allowed_callers=["code_execution_20260120"])
+(palanca 2: programmatic tool calling) -- asi Claude puede invocarla desde
+el codigo que corre dentro de code_execution en vez de como tool_use
+directo, y la tabla completa nunca entra al contexto de la conversacion.
 
 --------------------------------------------------------------------------
 Como se conectan search_knowledge_base -> get_source_table -> code_execution
@@ -63,16 +68,16 @@ from anthropic import beta_tool  # noqa: F401 -- lo vas a necesitar para decorar
 from app.rag import embeddings, vector_db  # noqa: F401
 from app.config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL  # noqa: F401
 
-CODE_EXECUTION_TOOL = {"type": "code_execution_20260521", "name": "code_execution"}
+CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
 
-# Estado global para pasar la store y acumular sources entre tool calls
+# Estado global para pasar las stores y acumular sources entre tool calls
 _store: vector_db.QdrantStorage | None = None
-_graph_store: object | None = None
+_graph_store = None  # Neo4jGraphStore | None -- import perezoso, ver search_knowledge_base
 _accumulated_sources: list[str] = []
 
 
 def _init_tools(store: vector_db.QdrantStorage, graph_store=None) -> None:
-    """Inicializar los tools con una instancia de store y resetear el estado."""
+    """Inicializar los tools con las stores y resetear el estado."""
     global _store, _graph_store, _accumulated_sources
     _store = store
     _graph_store = graph_store
@@ -132,13 +137,16 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@beta_tool
+@beta_tool(allowed_callers=["code_execution_20260120"])
 def get_source_table(source_id: str) -> str:
     """Obtener la tabla exacta de una planilla ingerida.
 
     Se usa SIEMPRE antes de hacer cálculos numericos, promedios, gráficos o
     comparaciones exactas -- los fragmentos de search_knowledge_base son una
-    aproximación difusa, no datos exactos.
+    aproximación difusa, no datos exactos. Se llama desde el codigo que
+    escribis en code_execution (no directo): asi la tabla completa nunca
+    entra al contexto de la conversacion, solo el resultado que tu codigo
+    calcule.
 
     Args:
         source_id: El identificador del tab de planilla (devuelto por search_knowledge_base)

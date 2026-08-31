@@ -72,6 +72,10 @@ from app.graph import retrieval
 
 logger = logging.getLogger(__name__)
 
+# Se usa code_execution_20260120 por decision de diseno explicita del
+# sub-proyecto 2 (ver spec), no porque 20260521 carezca de soporte para
+# allowed_callers -- el SDK instalado (anthropic 1.2.0) acepta
+# allowed_callers en ambas variantes.
 CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
 
 # Estado global para pasar las stores y acumular sources entre tool calls

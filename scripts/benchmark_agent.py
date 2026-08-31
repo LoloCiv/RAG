@@ -87,29 +87,33 @@ def run_question(question: str) -> dict:
     baseline. Depende de servicios vivos -- no se testea con pytest."""
     import anthropic
 
-    from app.agent.claude_agent import SYSTEM_PROMPT
+    from app.agent.claude_agent import SYSTEM_PROMPT, _tool_runner_kwargs
     from app.agent.tools import CODE_EXECUTION_TOOL, _init_tools, get_source_table, search_knowledge_base
-    from app.config import CLAUDE_MODEL, EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL
+    from app.config import EMBED_DIM, QDRANT_COLLECTION, QDRANT_URL
     from app.graph.neo4j_client import Neo4jGraphStore
     from app.rag import vector_db
 
     store = vector_db.QdrantStorage(url=QDRANT_URL, collection=QDRANT_COLLECTION, dim=EMBED_DIM)
+
+    # El grafo es una mejora, no un requisito: si Neo4j esta caido, el
+    # agente sigue funcionando solo con busqueda vectorial (igual que antes
+    # de este sub-proyecto).
     try:
         graph_store = Neo4jGraphStore()
-    except ConnectionError:
+    except Exception:  # noqa: BLE001 - el grafo es una mejora, nunca un requisito:
+        # cualquier fallo construyendo Neo4jGraphStore() (contenedor caido,
+        # ConnectionError, pero tambien fallos mas angostos como permisos o
+        # restricciones del server al crear el constraint en _ensure_schema)
+        # tiene que degradar a busqueda solo vectorial, no tirar abajo la
+        # medicion. Mismo criterio que run_turn() en app/agent/claude_agent.py:
+        # este arnes mide ese mismo camino de codigo y tiene que degradar igual.
         graph_store = None
     _init_tools(store, graph_store)
 
     client = anthropic.Anthropic()
     t0 = time.time()
     runner = client.beta.messages.tool_runner(
-        model=CLAUDE_MODEL,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        cache_control={"type": "ephemeral"},
-        system=SYSTEM_PROMPT,
-        tools=[search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL],
-        messages=[{"role": "user", "content": question}],
+        **_tool_runner_kwargs([{"role": "user", "content": question}])
     )
 
     round_trips = 0
@@ -118,20 +122,21 @@ def run_question(question: str) -> dict:
     cache_read = 0
     cache_creation = 0
     tokens_out = 0
-    for message in runner:
-        round_trips += 1
-        usage = getattr(message, "usage", None)
-        if usage:
-            tokens_in += getattr(usage, "input_tokens", 0) or 0
-            cache_read += getattr(usage, "cache_read_input_tokens", 0) or 0
-            cache_creation += getattr(usage, "cache_creation_input_tokens", 0) or 0
-            tokens_out += getattr(usage, "output_tokens", 0) or 0
-        for block in message.content:
-            if getattr(block, "type", None) in ("tool_use", "server_tool_use"):
-                tool_calls += 1
-
-    if graph_store is not None:
-        graph_store.close()
+    try:
+        for message in runner:
+            round_trips += 1
+            usage = getattr(message, "usage", None)
+            if usage:
+                tokens_in += getattr(usage, "input_tokens", 0) or 0
+                cache_read += getattr(usage, "cache_read_input_tokens", 0) or 0
+                cache_creation += getattr(usage, "cache_creation_input_tokens", 0) or 0
+                tokens_out += getattr(usage, "output_tokens", 0) or 0
+            for block in message.content:
+                if getattr(block, "type", None) in ("tool_use", "server_tool_use"):
+                    tool_calls += 1
+    finally:
+        if graph_store is not None:
+            graph_store.close()
 
     # total_in = tokens_in + cache_read + cache_creation es la unica columna
     # comparable manzana-a-manzana contra el baseline (medido sin cache

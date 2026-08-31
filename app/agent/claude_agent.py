@@ -101,6 +101,24 @@ Respondes preguntas usando el historial propio de eventos, presupuestos y provee
 - Si no encontras nada relevante, decilo claramente en vez de inventar."""
 
 
+def _tool_runner_kwargs(message_history: list[dict]) -> dict:
+    """Kwargs compartidos del tool_runner entre run_turn() y el arnes de
+    benchmark (scripts/benchmark_agent.py). Un solo lugar que los define:
+    ya divergieron una vez durante la implementacion de este sub-proyecto
+    (el except de Neo4j se amplio aca y no en el arnes) porque estaban
+    duplicados a mano en los dos archivos.
+    """
+    return {
+        "model": CLAUDE_MODEL,
+        "max_tokens": 16000,
+        "thinking": {"type": "adaptive"},
+        "cache_control": {"type": "ephemeral"},
+        "system": SYSTEM_PROMPT,
+        "tools": [search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL],
+        "messages": message_history,
+    }
+
+
 def run_turn(message_history: list[dict]) -> dict:
     """Ejecutar un turno del agente con Claude.
     
@@ -141,15 +159,7 @@ def run_turn(message_history: list[dict]) -> dict:
         # contenido repetido de vueltas anteriores. Este parametro activa
         # caching automatico, que coloca el breakpoint en el ultimo bloque
         # cacheable y lo va corriendo a medida que crece la conversacion.
-        runner = client.beta.messages.tool_runner(
-            model=CLAUDE_MODEL,
-            max_tokens=16000,
-            thinking={"type": "adaptive"},
-            cache_control={"type": "ephemeral"},
-            system=SYSTEM_PROMPT,
-            tools=[search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL],
-            messages=message_history,
-        )
+        runner = client.beta.messages.tool_runner(**_tool_runner_kwargs(message_history))
 
         last_message = None
         for message in runner:

@@ -170,16 +170,20 @@ congelado (dos preguntas reales, agente sin ninguna palanca aplicada):
 | | round-trips | 3 | 3 | +0% |
 | | tool calls | 4 | 3 | -25% |
 | | tokens totales (in + cache) | 43.783 | 48.046 | +10% |
-| | **costo ponderado*** | 43.783 | **37.364** | **-15%** |
+| | **costo ponderado de entrada*** | 43.783 | **37.364** | **-15%** |
 | **planificación** | tiempo | 43,3 s | 110,5 s | +155% |
 | | round-trips | 3 | 6 | +100% |
 | | tool calls | 6 | 14 | +133% |
 | | tokens totales (in + cache) | 65.499 | 319.772 | +388% |
-| | **costo ponderado*** | 65.499 | **74.620** | **+14%** |
+| | **costo ponderado de entrada*** | 65.499 | **74.620** | **+14%** |
 
 \* *Costo ponderado* pondera lecturas de caché a 0,1× y escrituras a 1,25×
-(precios reales de la API), y es la única columna comparable 1:1 contra el
-baseline: el baseline no usaba caching, así que ahí tokens totales == costo.
+(precios reales de la API). Es solo de entrada -- excluye `tokens_out`
+porque el baseline congelado nunca lo capturó (sus entradas en `BASELINE`
+tienen `tokens_out: 0` con un comentario aclarando que no se capturó al
+congelar, ver `scripts/benchmark_agent.py`) -- y es la única columna
+comparable 1:1 contra el baseline: el baseline no usaba caching, así que ahí
+tokens totales == costo.
 El conteo crudo de `tokens_in` de la API por sí solo cae a valores de un
 dígito una vez que el caching está activo (porque ya no cuenta los tokens
 servidos desde caché), lo que produciría un "-100%" engañoso si se lo
@@ -196,8 +200,10 @@ la misma cantidad de round-trips.
 **La pregunta "planificación" no era el caso objetivo de la palanca 3** --
 el spec ya señalaba que sus 3 round-trips eran eficientes por la
 paralelización del SDK. Medido dos veces más para confirmar que no era un
-outlier (+185% y -23% de costo en corridas separadas de la misma pregunta),
-la causa está identificada: el bloque de mapa se calibró (`GRAPH_MAX_ANCHORS`/
+outlier (la misma pregunta se volvió a medir dos veces más: la segunda
+corrida dio +185% de tokens totales y -23% de costo ponderado; la oficial
+de la tabla de arriba dio +388% de tokens y +14% de costo), la causa está
+identificada: el bloque de mapa se calibró (`GRAPH_MAX_ANCHORS`/
 `GRAPH_MAX_EDGES` en `app/config.py`) mirando una sola entidad muy conectada
 del corpus ("Catering Buena Mesa", 11 aristas), pero una pregunta amplia como
 esta toca 5 entidades ancla a la vez, cada una aportando sus propias

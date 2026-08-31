@@ -7,7 +7,10 @@ from app.agent.tools import CODE_EXECUTION_TOOL, get_source_table
 
 
 def test_code_execution_tool_usa_la_variante_programatica():
-    # 20260120 (no 20260521): es la variante que soporta allowed_callers.
+    # Se usa code_execution_20260120 por decision de diseno explicita del
+    # sub-proyecto 2 (ver spec), no porque 20260521 carezca de soporte para
+    # allowed_callers -- el SDK instalado (anthropic 1.2.0) acepta
+    # allowed_callers en ambas variantes.
     assert CODE_EXECUTION_TOOL == {"type": "code_execution_20260120", "name": "code_execution"}
 
 

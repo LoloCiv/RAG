@@ -45,6 +45,17 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 # genuinamente distintas ("Catering Mala Mesa"). Ver app/graph/dedup.py.
 GRAPH_DEDUP_THRESHOLD = int(os.getenv("GRAPH_DEDUP_THRESHOLD", "90"))
 
+# --- Enriquecimiento del agente con el grafo (sub-proyecto 2) ---
+# Cuantas entidades "ancla" (las que aparecen en los documentos que ya
+# encontro la busqueda semantica) se muestran en el mapa que ve Claude.
+# 5: alcanza para orientar sin inflar el prompt.
+GRAPH_MAX_ANCHORS = int(os.getenv("GRAPH_MAX_ANCHORS", "5"))
+# Techo de aristas totales en el mapa. 40 cubre con margen las 11 aristas
+# del nodo mas conectado del corpus de prueba ("Catering Buena Mesa") y
+# mantiene el bloque en el orden de los 200-400 tokens que justifica esta
+# palanca (contra los ~4.000 que cuesta una busqueda de chunks).
+GRAPH_MAX_EDGES = int(os.getenv("GRAPH_MAX_EDGES", "40"))
+
 # --- Modelos ---
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 # voyage-4-lite (no voyage-large-2): los modelos "voyage-4*" tienen 200M

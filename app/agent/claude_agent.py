@@ -87,6 +87,7 @@ import logging
 from app.agent.tools import search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL, _init_tools
 from app.agent import files
 from app.config import CLAUDE_MODEL, QDRANT_URL, QDRANT_COLLECTION, EMBED_DIM
+from app.graph.neo4j_client import Neo4jGraphStore
 from app.rag import vector_db
 
 logger = logging.getLogger(__name__)
@@ -113,52 +114,65 @@ def run_turn(message_history: list[dict]) -> dict:
             - sources: Lista de source_ids usados en búsquedas
             - chart_paths: Paths locales de gráficos generados
     """
-    # Inicializar la store y los tools
     store = vector_db.QdrantStorage(url=QDRANT_URL, collection=QDRANT_COLLECTION, dim=EMBED_DIM)
-    _init_tools(store)
-    
-    # Crear cliente de Anthropic
+
+    # El grafo es una mejora, no un requisito: si Neo4j esta caido, el
+    # agente sigue funcionando solo con busqueda vectorial (igual que antes
+    # de este sub-proyecto). Mismo criterio que el sidebar de Streamlit.
+    try:
+        graph_store = Neo4jGraphStore()
+    except ConnectionError:
+        logger.warning("Grafo no disponible, el agente sigue solo con busqueda vectorial")
+        graph_store = None
+
+    _init_tools(store, graph_store)
+
     client = anthropic.Anthropic()
-    
-    # Crear el tool_runner
-    runner = client.beta.messages.tool_runner(
-        model=CLAUDE_MODEL,
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        system=SYSTEM_PROMPT,
-        tools=[search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL],
-        messages=message_history,
-    )
-    
-    # Ejecutar el runner
-    last_message = None
-    for message in runner:
-        last_message = message
-    
-    if last_message is None:
+
+    try:
+        # cache_control: el contenido de tool results se reenvia completo en
+        # cada round-trip (la API es stateless). Medido en el baseline: el
+        # 79% de los tokens facturados en una pregunta compleja eran
+        # contenido repetido de vueltas anteriores. Este parametro activa
+        # caching automatico, que coloca el breakpoint en el ultimo bloque
+        # cacheable y lo va corriendo a medida que crece la conversacion.
+        runner = client.beta.messages.tool_runner(
+            model=CLAUDE_MODEL,
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            cache_control={"type": "ephemeral"},
+            system=SYSTEM_PROMPT,
+            tools=[search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL],
+            messages=message_history,
+        )
+
+        last_message = None
+        for message in runner:
+            last_message = message
+
+        if last_message is None:
+            return {
+                "response_content": [],
+                "answer_text": "",
+                "sources": [],
+                "chart_paths": [],
+            }
+
+        answer_text = _extract_text_from_content(last_message.content)
+        chart_paths = files.save_generated_files(client, last_message.content)
+
+        from app.agent import tools
+        accumulated_sources = list(set(tools._accumulated_sources))
+
         return {
-            "response_content": [],
-            "answer_text": "",
-            "sources": [],
-            "chart_paths": [],
+            "response_content": last_message.content,
+            "answer_text": answer_text,
+            "sources": accumulated_sources,
+            "chart_paths": chart_paths,
         }
-    
-    # Extraer el texto de la respuesta final
-    answer_text = _extract_text_from_content(last_message.content)
-    
-    # Guardar archivos generados (charts)
-    chart_paths = files.save_generated_files(client, last_message.content)
-    
-    # Obtener los sources acumulados
-    from app.agent import tools
-    accumulated_sources = list(set(tools._accumulated_sources))  # Deduplicar
-    
-    return {
-        "response_content": last_message.content,
-        "answer_text": answer_text,
-        "sources": accumulated_sources,
-        "chart_paths": chart_paths,
-    }
+    finally:
+        if graph_store is not None:
+            graph_store.close()
 
 
 def _extract_text_from_content(content_blocks: list) -> str:

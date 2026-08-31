@@ -67,13 +67,15 @@ CODE_EXECUTION_TOOL = {"type": "code_execution_20260521", "name": "code_executio
 
 # Estado global para pasar la store y acumular sources entre tool calls
 _store: vector_db.QdrantStorage | None = None
+_graph_store: object | None = None
 _accumulated_sources: list[str] = []
 
 
-def _init_tools(store: vector_db.QdrantStorage) -> None:
+def _init_tools(store: vector_db.QdrantStorage, graph_store=None) -> None:
     """Inicializar los tools con una instancia de store y resetear el estado."""
-    global _store, _accumulated_sources
+    global _store, _graph_store, _accumulated_sources
     _store = store
+    _graph_store = graph_store
     _accumulated_sources = []
 
 

@@ -26,22 +26,36 @@ def format_graph_context(
         return ""
 
     capped_anchors = anchors[:max_anchors]
-    anchor_names = {a["name"] for a in capped_anchors}
     capped_edges = edges[:max_edges]
 
     lines: list[str] = []
+    # Una arista cuyos DOS extremos son anclas es tocada dos veces por el
+    # for externo (una vez como saliente bajo la ancla-origen, otra vez
+    # como entrante bajo la ancla-destino) -- pero es el mismo hecho visto
+    # desde los dos lados, y este es el unico modulo cuyo trabajo es cuidar
+    # el presupuesto de tokens del bloque, asi que no corresponde gastarlo
+    # dos veces en el mismo dato. Se imprime una sola vez, bajo la primera
+    # ancla que la toca en el orden de relevancia que ya trae la lista (no
+    # se reordena nada aca): quedan registrados por indice en
+    # emitted_edge_indices para que las anclas siguientes la salteen.
+    emitted_edge_indices: set[int] = set()
     for anchor in capped_anchors:
         types = "/".join(anchor.get("types") or [])
         lines.append(f"{anchor['name']} [{types}] ({anchor['doc_count']} docs)")
 
-        for edge in capped_edges:
+        for idx, edge in enumerate(capped_edges):
+            if idx in emitted_edge_indices:
+                continue
+
             source_ids = edge.get("source_ids") or []
             ref = f" ({source_ids[0]})" if source_ids else ""
 
             if edge["source"] == anchor["name"]:
                 lines.append(f"  -{edge['rel_type']}-> {edge['target']}{ref}")
+                emitted_edge_indices.add(idx)
             elif edge["target"] == anchor["name"]:
                 lines.append(f"  <-{edge['rel_type']}- {edge['source']}{ref}")
+                emitted_edge_indices.add(idx)
             # Ni source ni target es esta ancla: no corresponde bajo este
             # bloque (podria corresponder bajo otra ancla, se evalua en la
             # siguiente vuelta del for externo).

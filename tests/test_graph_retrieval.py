@@ -76,3 +76,22 @@ def test_arista_sin_source_ids_no_rompe():
     edges = [_edge("Catering Buena Mesa", "REL", "Algo", [])]
     texto = format_graph_context(anchors, edges)
     assert "Algo" in texto  # no explota, solo no muestra un source_id
+
+
+def test_arista_entre_dos_anclas_se_imprime_una_sola_vez():
+    # Si ambos extremos de la arista son anclas, el recorrido la toca dos
+    # veces (una como saliente desde el bloque del ancla-origen, otra como
+    # entrante desde el bloque del ancla-destino) -- pero es el mismo hecho
+    # visto desde los dos lados y debe imprimirse una sola vez, bajo la
+    # primera ancla que la toca en el orden de relevancia ya dado.
+    anchors = [
+        _anchor("Proveedor A", ["Proveedor"], 10),
+        _anchor("Evento B", ["Evento"], 8),
+    ]
+    edges = [_edge("Proveedor A", "CONTRATADO_PARA", "Evento B", [])]
+
+    texto = format_graph_context(anchors, edges)
+
+    assert texto.count("CONTRATADO_PARA") == 1
+    assert "Proveedor A [Proveedor] (10 docs)" in texto
+    assert "Evento B [Evento] (8 docs)" in texto

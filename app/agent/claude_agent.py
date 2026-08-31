@@ -121,8 +121,13 @@ def run_turn(message_history: list[dict]) -> dict:
     # de este sub-proyecto). Mismo criterio que el sidebar de Streamlit.
     try:
         graph_store = Neo4jGraphStore()
-    except ConnectionError:
-        logger.warning("Grafo no disponible, el agente sigue solo con busqueda vectorial")
+    except Exception:  # noqa: BLE001 - el grafo es una mejora, nunca un requisito:
+        # cualquier fallo construyendo Neo4jGraphStore() (contenedor caido,
+        # ConnectionError, pero tambien fallos mas angostos como permisos o
+        # restricciones del server al crear el constraint en _ensure_schema)
+        # tiene que degradar a busqueda solo vectorial, no tirar abajo el turno.
+        # Mismo criterio que el sidebar de Streamlit (streamlit_app.py).
+        logger.exception("Grafo no disponible, el agente sigue solo con busqueda vectorial")
         graph_store = None
 
     _init_tools(store, graph_store)

@@ -251,6 +251,10 @@ def get_source_table(source_id: str) -> str:
     entra al contexto de la conversacion, solo el resultado que tu codigo
     calcule.
 
+    Si el resultado trae "truncated": true, la tabla se recorto por tamaño
+    (no vino completa) -- avisale SIEMPRE al usuario que el cálculo es
+    sobre una muestra parcial de los datos, no el 100%, cuando esto pase.
+
     Args:
         source_id: El identificador del tab de planilla (devuelto por search_knowledge_base)
 

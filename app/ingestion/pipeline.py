@@ -38,13 +38,18 @@ class ResyncResult:
     new_or_updated: list[str] = field(default_factory=list)
     skipped_unchanged: list[str] = field(default_factory=list)
     failed: list[tuple[str, str]] = field(default_factory=list)  # (file_name, error_message)
+    # (file_name, warning_message) -- el archivo SE ingirio (no es un
+    # "failed"), pero algo amerita revision manual. Hoy solo la usa el PDF
+    # sin texto extraible (posible escaneado, Fase 4 del roadmap).
+    warnings: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
         return (
             f"{len(self.new_or_updated)} nuevos/actualizados, "
             f"{len(self.skipped_unchanged)} sin cambios, "
-            f"{len(self.failed)} con error"
+            f"{len(self.failed)} con error, "
+            f"{len(self.warnings)} con advertencia"
         )
 
 
@@ -89,11 +94,13 @@ def run_resync(folder_id: str) -> ResyncResult:
 
             try:
                 old_entry = man.get(file_id)
-                source_ids = _ingest_one_file(
+                source_ids, warning = _ingest_one_file(
                     store, graph_store, file_id, name, mime_type, modified_time, loader_kind, old_entry
                 )
                 manifest.record_ingested(man, file_id, name, mime_type, modified_time, source_ids)
                 result.new_or_updated.append(name)
+                if warning:
+                    result.warnings.append((name, warning))
             except Exception as e:  # noqa: BLE001 - un archivo con error no debe abortar el resync completo
                 logger.exception("Fallo ingiriendo %s", name)
                 result.failed.append((name, str(e)))
@@ -126,7 +133,13 @@ def _ingest_one_file(
     modified_time: str,
     loader_kind: str,
     old_entry: dict | None,
-) -> list[str]:
+) -> tuple[list[str], str | None]:
+    """Devuelve (source_ids, warning). warning es None salvo un caso hoy:
+    un PDF sin texto extraible (posible escaneado, Fase 4 del roadmap --
+    PDFReader de LlamaIndex solo lee capa de texto, sin OCR). El archivo
+    SE ingiere igual (source_id valido, aunque sin chunks) -- no es un
+    error, es una advertencia para revision manual.
+    """
     # Si ya existia una version vieja de este archivo, la borramos antes de
     # re-insertar (evita puntos huerfanos si cambio la cantidad de chunks).
     if old_entry:
@@ -143,7 +156,8 @@ def _ingest_one_file(
         source_id = pdf_or_doc_source_id(file_id)
         _upsert_text_chunks(store, source_id, file_id, name, "pdf", modified_time, chunks)
         _sync_graph_safe(graph_store, source_id, load_pdf_full_text(pdf_bytes, name), name)
-        return [source_id]
+        warning = "PDF sin texto extraible (posiblemente escaneado, sin capa OCR)" if not chunks else None
+        return [source_id], warning
 
     if loader_kind == "gdoc":
         text = drive_client.export_text(file_id)
@@ -152,7 +166,7 @@ def _ingest_one_file(
         _upsert_text_chunks(store, source_id, file_id, name, "gdoc", modified_time, chunks)
         # El export ya viene como documento entero, no hace falta re-armarlo.
         _sync_graph_safe(graph_store, source_id, text, name)
-        return [source_id]
+        return [source_id], None
 
     if loader_kind == "sheet":
         if mime_type == drive_client.MIMETYPE_GSHEET:
@@ -176,7 +190,7 @@ def _ingest_one_file(
                 f"{name} (tab: {tab.tab_name})",
             )
             source_ids.append(tab.source_id)
-        return source_ids
+        return source_ids, None
 
     raise ValueError(f"loader_kind desconocido: {loader_kind}")  # no deberia pasar, get_loader_for_mimetype ya filtro
 

@@ -69,6 +69,13 @@ with st.sidebar:
                     with st.expander(f"⚠️ {len(result.failed)} archivo(s) con error"):
                         for name, err in result.failed:
                             st.write(f"**{name}**: {err}")
+                if result.warnings:
+                    # No son errores (el archivo SI se ingirio) -- hoy solo
+                    # los dispara un PDF sin texto extraible, posible
+                    # escaneado sin OCR (Fase 4 del roadmap).
+                    with st.expander(f"📄 {len(result.warnings)} archivo(s) con advertencia"):
+                        for name, warning in result.warnings:
+                            st.write(f"**{name}**: {warning}")
             except Exception as e:
                 logger.exception("Fallo el resync de Drive")
                 st.error(f"No se pudo sincronizar: {e}")

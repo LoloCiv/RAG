@@ -160,7 +160,7 @@ def test_init_tools_resetea_el_estado_de_anclas_mostradas():
     _graph_context_for(store, ["gdrive:abc"])
     assert _graph_context_for(store, ["gdrive:abc"]) == ""  # ya mostrada, mismo turno
 
-    _init_tools(_FakeVectorStore({}), None)  # nuevo turno
+    _init_tools(_FakeVectorStore([]), None)  # nuevo turno
 
     # Turno nuevo: la misma ancla vuelve a ser "nueva".
     otra_vez = _graph_context_for(store, ["gdrive:abc"])
@@ -169,14 +169,16 @@ def test_init_tools_resetea_el_estado_de_anclas_mostradas():
 
 class _FakeVectorStore:
     """Store vectorial falso: devuelve un resultado fijo de search_knowledge_base
-    sin llamar a Qdrant."""
+    sin llamar a Qdrant. `result` es la lista correlacionada que devuelve
+    QdrantStorage.search() (Fase 2) -- [{"text", "source_id", "file_name",
+    "score"}, ...], no el dict {"contexts", "sources"} de antes."""
 
     def __init__(self, result):
         self._result = result
 
     def search(self, query_vector, top_k, kind_filter):
-        # Devolver una copia -- search_knowledge_base muta result["mapa"] in place.
-        return dict(self._result)
+        # Devolver una copia -- search_knowledge_base no debe mutar el fixture.
+        return list(self._result)
 
 
 def test_search_knowledge_base_llama_a_graph_context_for_y_arma_mapa(monkeypatch):
@@ -185,7 +187,9 @@ def test_search_knowledge_base_llama_a_graph_context_for_y_arma_mapa(monkeypatch
     graph_store inicializado y los sources que devolvio la busqueda, y mete
     el resultado real (no un stub) bajo la clave "mapa" del JSON devuelto."""
 
-    fake_store = _FakeVectorStore({"contexts": ["algo"], "sources": ["gdrive:abc"]})
+    fake_store = _FakeVectorStore(
+        [{"text": "algo", "source_id": "gdrive:abc", "file_name": "algo.pdf", "score": 0.9}]
+    )
     fake_graph_store = _FakeGraphStore(
         anchors=[{"name": "Catering Buena Mesa", "norm_name": "catering buena mesa", "types": ["Proveedor"], "doc_count": 6}],
         edges=[{"source": "Catering Buena Mesa", "rel_type": "CONTRATADO_PARA", "target": "Casamiento Perez-Gomez", "source_ids": ["gdrive:abc"]}],
@@ -209,6 +213,11 @@ def test_search_knowledge_base_llama_a_graph_context_for_y_arma_mapa(monkeypatch
     # test_con_anclas_y_aristas_arma_el_mapa).
     assert "Catering Buena Mesa" in result["mapa"]
     assert "CONTRATADO_PARA" in result["mapa"]
+    # El contrato JSON que ve Claude no cambio con la Fase 2 (shape interno
+    # de QdrantStorage.search() si) -- contexts/sources siguen siendo listas
+    # planas armadas a partir de la lista correlacionada del store.
+    assert result["contexts"] == ["algo"]
+    assert result["sources"] == ["gdrive:abc"]
 
     # _FakeGraphStore (definido arriba en este archivo) no tiene close(): lo
     # cierra run_turn(), no search_knowledge_base -- no hay nada que

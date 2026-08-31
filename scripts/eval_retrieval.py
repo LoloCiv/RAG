@@ -92,10 +92,10 @@ def reciprocal_rank(retrieved_source_ids: list[str], expected_source_id_sets: li
     CUALQUIER archivo esperado -- no el primero de la lista de esperados,
     el primero que aparece en el ranking real. 0.0 si ninguno aparecio.
 
-    Depende de que QdrantStorage.search() devuelva "sources" en orden real
-    de relevancia (ver fix en app/rag/vector_db.py:
-    _dedup_sources_preserving_order) -- con un set() esta metrica mediria
-    ruido, no senal.
+    Depende de que retrieved_source_ids venga en orden real de relevancia
+    (ver app/rag/vector_db.py: QdrantStorage.dedup_source_ids, que dedupea
+    preservando el orden en el que aparece cada source_id en los resultados
+    de Qdrant) -- con un set() esta metrica mediria ruido, no senal.
     """
     if not expected_source_id_sets:
         return 0.0
@@ -147,8 +147,10 @@ def evaluate_question(question: dict, manifest: dict, store: vector_db.QdrantSto
     scripts/benchmark_agent.py)."""
     expected = resolve_expected_source_ids(question["expected_files"], manifest)
     query_vector = embeddings.embed_texts([question["question"]], input_type="query")[0]
-    result = store.search(query_vector, top_k=top_k, kind_filter="text_chunk")
-    retrieved = result["sources"]
+    # Lista correlacionada por chunk desde la Fase 2 (reranking) -- dedupear
+    # a "sources" a nivel documento, igual que search_knowledge_base.
+    chunks = store.search(query_vector, top_k=top_k, kind_filter="text_chunk")
+    retrieved = vector_db.QdrantStorage.dedup_source_ids(chunks)
     return {
         "id": question["id"],
         "recall": recall_at_k(retrieved, expected),

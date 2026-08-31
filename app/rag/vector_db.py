@@ -10,8 +10,13 @@ agente). Especificamente necesita una clase QdrantStorage con esta interfaz
 
         def upsert(self, ids: list[str], vectors: list[list[float]], payloads: list[dict]) -> None: ...
 
-        def search(self, query_vector: list[float], top_k: int = 5, kind_filter: str | None = None) -> dict:
-            # devuelve {"contexts": [...], "sources": [...]}
+        def search(self, query_vector: list[float], top_k: int = 5, kind_filter: str | None = None) -> list[dict]:
+            # devuelve [{"text": ..., "source_id": ..., "file_name": ..., "score": ...}, ...],
+            # un item por chunk, SIN dedupear, en orden de relevancia (score
+            # descendente). Fase 2 (reranking) cambio esto -- antes devolvia
+            # {"contexts": [...], "sources": [...]} dedupeado a nivel documento.
+            # QdrantStorage.dedup_source_ids(result) dedupea a "sources" cuando
+            # hace falta (ver app/agent/tools.py, scripts/eval_retrieval.py).
             ...
 
         def get_by_source_id(self, source_id: str) -> dict | None:
@@ -126,32 +131,51 @@ class QdrantStorage:
             limit=top_k,
         )
 
-        return self._dedup_sources_preserving_order(response.points)
+        return self._points_to_results(response.points)
 
     @staticmethod
-    def _dedup_sources_preserving_order(points) -> dict:
-        """Arma {"contexts", "sources"} a partir de los puntos que devuelve
-        Qdrant, YA ordenados por score (mas relevante primero).
+    def _points_to_results(points) -> list[dict]:
+        """Arma una lista correlacionada (text/source_id/file_name/score) a
+        partir de los puntos que devuelve Qdrant, YA ordenados por score
+        (mas relevante primero). Sin dedupear -- el reranking necesita el
+        score por chunk, no colapsado a nivel documento.
 
-        Estatico y aislado a proposito: se puede testear el orden del
-        dedup con puntos falsos, sin Qdrant vivo. Antes el dedup de
-        sources usaba un set() -- Python no garantiza orden ahi, asi que
-        se perdia la info de "que source es mas relevante" (necesaria
-        para MRR en scripts/eval_retrieval.py). dict como set ordenado
-        conserva el orden de primera aparicion.
+        Estatico y aislado a proposito: se puede testear el orden sin
+        Qdrant vivo. Antes esto vivia en _dedup_sources_preserving_order,
+        que dedupeaba a nivel documento y tiraba el score -- suficiente
+        para Recall@k/MRR (scripts/eval_retrieval.py) pero no para
+        reranking, que necesita reordenar chunks individuales.
         """
-        contexts = []
-        sources: dict[str, None] = {}
+        results = []
 
         for r in points:
             payload = getattr(r, "payload", None) or {}
             text = payload.get("text", "")
-            source_id = payload.get("source_id", "")
             if text:
-                contexts.append(text)
-                sources[source_id] = None
+                results.append(
+                    {
+                        "text": text,
+                        "source_id": payload.get("source_id", ""),
+                        "file_name": payload.get("file_name", ""),
+                        "score": getattr(r, "score", 0.0),
+                    }
+                )
 
-        return {"contexts": contexts, "sources": list(sources)}
+        return results
+
+    @staticmethod
+    def dedup_source_ids(results: list[dict]) -> list[str]:
+        """Dedupea "source_id" de una lista de resultados (ya en orden de
+        relevancia, ver _points_to_results), preservando el orden de
+        primera aparicion. dict como set ordenado -- un set() normal no
+        garantiza orden en Python, lo que perderia la info de "que source
+        es mas relevante" (necesaria para MRR en scripts/eval_retrieval.py
+        y para "sources" en search_knowledge_base).
+        """
+        seen: dict[str, None] = {}
+        for r in results:
+            seen[r["source_id"]] = None
+        return list(seen)
 
     def get_by_source_id(self, source_id: str) -> dict | None:
         """Obtener el payload del punto kind='table_data' para un source_id.

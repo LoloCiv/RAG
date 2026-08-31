@@ -13,8 +13,12 @@ Docs/resumenes de filas de sheets). Pasos:
   2. store.search(query_vec, top_k, kind_filter="text_chunk") -- IMPORTANTE
      el filtro "text_chunk": no queremos que aparezcan blobs de tabla (JSON
      crudo) mezclados en resultados de busqueda semantica
-  3. devolver {"contexts": [...], "sources": [...]} (mismo shape que ya
-     devuelve QdrantStorage.search())
+  3. devolver {"contexts": [...], "sources": [...]} -- ese es el contrato
+     JSON que ve Claude, sin cambios en la Fase 2. Lo que cambio (reranking,
+     Fase 2) es el shape INTERNO de QdrantStorage.search(): ahora devuelve
+     una lista correlacionada por chunk ([{"text","source_id","file_name",
+     "score"}, ...], sin dedupear), y esta funcion arma contexts/sources a
+     partir de ahi con QdrantStorage.dedup_source_ids().
 
 --------------------------------------------------------------------------
 2) get_source_table(source_id) -> dict
@@ -187,14 +191,22 @@ def search_knowledge_base(query: str, top_k: int = 5) -> str:
     # que hay que decirle cual es cual para que el retrieval funcione bien.
     query_vector = embeddings.embed_texts([query], input_type="query")[0]
 
-    # Buscar solo chunks de texto, no blobs de tabla
-    result = store.search(query_vector, top_k=top_k, kind_filter="text_chunk")
+    # Buscar solo chunks de texto, no blobs de tabla. Lista correlacionada
+    # por chunk (text/source_id/file_name/score, sin dedupear) desde la
+    # Fase 2 -- dedup_source_ids arma "sources" a nivel documento a partir
+    # de ahi, igual que antes hacia QdrantStorage.search() internamente.
+    chunks = store.search(query_vector, top_k=top_k, kind_filter="text_chunk")
+    sources = vector_db.QdrantStorage.dedup_source_ids(chunks)
 
     # Acumular sources para el contexto final del turno
     global _accumulated_sources
-    _accumulated_sources.extend([s for s in result["sources"] if s not in _accumulated_sources])
+    _accumulated_sources.extend([s for s in sources if s not in _accumulated_sources])
 
-    result["mapa"] = _graph_context_for(_graph_store, result["sources"])
+    result = {
+        "contexts": [c["text"] for c in chunks],
+        "sources": sources,
+        "mapa": _graph_context_for(_graph_store, sources),
+    }
 
     return json.dumps(result, ensure_ascii=False)
 

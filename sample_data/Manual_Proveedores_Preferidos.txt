@@ -1,0 +1,30 @@
+Manual interno: Proveedores preferidos por categoria - Eventos Aurora
+
+Este documento resume las recomendaciones internas del equipo de
+coordinacion sobre que proveedores priorizar por categoria, en base a la
+experiencia de eventos anteriores (ver Directorio_Proveedores.xlsx para
+datos de contacto y precios).
+
+Catering:
+Catering Buena Mesa es el proveedor preferido para eventos sociales (bodas,
+cumpleanos) por su rating mas alto (4.8) y flexibilidad con menus
+especiales. Sabores del Plata es mejor opcion para eventos corporativos
+grandes (formato cocktail, mas de 200 personas) por capacidad operativa.
+
+Musica:
+Los Sonidos (banda en vivo) para bodas de alto presupuesto. DJ Marco Vidal
+es la opcion mas costo-efectiva y con excelente rating (4.6) para
+cumpleanos y quinceañeras. Sonido Total como alternativa economica cuando
+el presupuesto es ajustado.
+
+Locacion:
+Quinta El Ombu es la locacion insignia de la empresa para bodas de campo
+(rating 4.8, muy buena relacion con el equipo de coordinacion). Salon
+Jacaranda funciona bien para eventos de hasta 65-70 invitados con pista de
+baile (ver Reporte_Post_Evento_Roberto_Sanchez para el detalle de por que
+esta limitacion importa).
+
+Advertencia general:
+Flores Bouquet tiene rating mas bajo (4.1) que Flores del Sur (4.9) -- ante
+la duda, priorizar Flores del Sur salvo que el cliente pida especificamente
+lo contrario o Flores del Sur no tenga disponibilidad.

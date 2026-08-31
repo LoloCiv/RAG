@@ -1,0 +1,24 @@
+# Secrets / credenciales
+.env
+credentials.json
+token.json
+
+# Datos locales generados
+/downloads/
+/data/manifest.json
+/data/chart_outputs/*
+!/data/chart_outputs/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# Datos del contenedor de Neo4j
+/neo4j_data/

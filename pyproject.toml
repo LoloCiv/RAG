@@ -1,0 +1,59 @@
+[project]
+name = "events-rag-poc"
+version = "0.1.0"
+description = "POC: agente RAG sobre Google Drive (eventos, presupuestos, proveedores) con Claude + Qdrant"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # LLM / agente
+    # >=1.2.0: el paso de grafo usa client.messages.parse(output_format=...)
+    # (structured outputs con Pydantic), que necesita la linea 1.x.
+    "anthropic>=1.2.0",
+    # Embeddings
+    # OJO: pineado <0.4.0 a proposito. Desde voyageai 0.4.x el paquete
+    # importa una feature de chunking que trae langchain-core como
+    # dependencia transitiva, y esa cadena arrastra `uuid_utils` (un
+    # paquete con una DLL nativa) que la politica de Application Control
+    # de este Windows bloquea al importar -- rompe el `import voyageai`
+    # entero, no algo que se pueda resolver con try/except en el codigo.
+    # 0.3.0 no tiene esa dependencia y expone la misma Client.embed().
+    "voyageai>=0.3.0,<0.4.0",
+    # Vector DB
+    "qdrant-client>=1.15.1",
+    # Grafo de conocimiento
+    "neo4j>=5.26.0",       # driver oficial, pure Python -- sin riesgo de DLL nativa
+    # OJO: rapidfuzz SI trae extension nativa (wheel prebuilt). Se verifico
+    # que importa en este Windows antes de construir nada encima -- la
+    # politica de Application Control que rompio `uuid_utils` (arrastrado
+    # por voyageai 0.4+) no lo bloquea. Si alguna vez lo bloqueara, el
+    # reemplazo es difflib.SequenceMatcher de la stdlib dentro de
+    # app/graph/dedup.py, sin cambiar la firma de find_best_match().
+    "rapidfuzz>=3.0.0",
+    # Parsing de PDF
+    "llama-index-core>=0.14.0",
+    "llama-index-readers-file>=0.5.4",
+    # Google Drive / Sheets
+    "google-api-python-client>=2.130.0",
+    "google-auth-oauthlib>=1.2.0",
+    "google-auth-httplib2>=0.2.0",
+    # Excel / Sheets -> DataFrame
+    "pandas>=2.2.0",
+    "openpyxl>=3.1.0",
+    # UI
+    "streamlit>=1.49.1",
+    # Config
+    "python-dotenv>=1.1.1",
+    "pydantic>=2.8.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

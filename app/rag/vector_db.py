@@ -126,17 +126,31 @@ class QdrantStorage:
             limit=top_k,
         )
 
-        contexts = []
-        sources = set()
+        return self._dedup_sources_preserving_order(response.points)
 
-        for r in response.points:
+    @staticmethod
+    def _dedup_sources_preserving_order(points) -> dict:
+        """Arma {"contexts", "sources"} a partir de los puntos que devuelve
+        Qdrant, YA ordenados por score (mas relevante primero).
+
+        Estatico y aislado a proposito: se puede testear el orden del
+        dedup con puntos falsos, sin Qdrant vivo. Antes el dedup de
+        sources usaba un set() -- Python no garantiza orden ahi, asi que
+        se perdia la info de "que source es mas relevante" (necesaria
+        para MRR en scripts/eval_retrieval.py). dict como set ordenado
+        conserva el orden de primera aparicion.
+        """
+        contexts = []
+        sources: dict[str, None] = {}
+
+        for r in points:
             payload = getattr(r, "payload", None) or {}
             text = payload.get("text", "")
             source_id = payload.get("source_id", "")
             if text:
                 contexts.append(text)
-                sources.add(source_id)
-        
+                sources[source_id] = None
+
         return {"contexts": contexts, "sources": list(sources)}
 
     def get_by_source_id(self, source_id: str) -> dict | None:

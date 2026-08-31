@@ -81,6 +81,49 @@ class Neo4jGraphStore:
         )
         return [r["name"] for r in records]
 
+    def anchors_by_source_ids(self, source_ids: list[str], limit: int) -> list[dict]:
+        """Entidades ancla para el enriquecimiento del agente (sub-proyecto
+        2): las que tienen AL MENOS uno de estos source_ids -- los mismos
+        que ya devuelve QdrantStorage.search() -- ordenadas por cuantos
+        documentos tocan en total (las mas conectadas primero, que son las
+        que mas sirven para orientar una pregunta).
+        """
+        if not source_ids:
+            return []
+        query = """
+        MATCH (e:Entity)
+        WHERE any(sid IN e.source_ids WHERE sid IN $source_ids)
+        RETURN e.name AS name, e.norm_name AS norm_name, e.types AS types,
+               size(e.source_ids) AS doc_count
+        ORDER BY doc_count DESC
+        LIMIT $limit
+        """
+        records, _, _ = self.driver.execute_query(
+            query, source_ids=source_ids, limit=limit, database_=self.database
+        )
+        return [dict(r) for r in records]
+
+    def neighborhood(self, norm_names: list[str], limit: int) -> list[dict]:
+        """Aristas donde el origen o el destino es una de estas anclas (por
+        norm_name). Ordenadas por cuantos documentos evidencian cada
+        relacion (mas fuentes primero), asi el corte por `limit` se queda
+        con las aristas mejor respaldadas si hay mas de las que entran.
+        """
+        if not norm_names:
+            return []
+        query = """
+        MATCH (a:Entity)-[r]->(b:Entity)
+        WHERE a.norm_name IN $norm_names OR b.norm_name IN $norm_names
+        RETURN a.name AS source, type(r) AS rel_type, b.name AS target,
+               r.source_ids AS source_ids
+        ORDER BY size(r.source_ids) DESC
+        LIMIT $limit
+        """
+        records, _, _ = self.driver.execute_query(
+            query, norm_names=norm_names, limit=limit, database_=self.database
+        )
+        return [dict(r) for r in records]
+
     def merge_entity(self, name: str, label: str, description: str, source_id: str) -> None:
         """Crea el nodo o, si ya existia, le suma este source_id y este label.
 

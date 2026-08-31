@@ -10,17 +10,29 @@ gráficos a partir de datos reales. Ver el diseño completo en el plan:
 - Estructura del proyecto, configuración (`app/config.py`)
 - Ingesta de Google Drive completa: auth OAuth, listado, PDF/Doc/Sheet/xlsx
   (`app/ingestion/`)
-- Manifest para resync idempotente
+- Manifest para resync idempotente, con aviso cuando un PDF no aportó texto
+  extraíble (posible escaneado sin OCR — ver `ResyncResult.warnings`)
 - Embeddings con Voyage AI (`app/rag/embeddings.py`) y wrapper de Qdrant
-  (`app/rag/vector_db.py`)
+  (`app/rag/vector_db.py`), con **reranking** (Voyage `rerank-2.5-lite`) para
+  reordenar los candidatos antes de devolverlos
 - Agente Claude con `tool_runner`, `search_knowledge_base` /
-  `get_source_table` y generación de gráficos (`app/agent/`)
-- UI de Streamlit (`streamlit_app.py`)
+  `get_source_table` y generación de gráficos (`app/agent/`), con guard
+  explícito de prompt injection en el system prompt
+- **Streaming** de la respuesta (`run_turn_streaming`) con indicación de
+  progreso durante tool calls largos, y fuentes citadas como nombre de
+  archivo + link a Drive (no el `source_id` crudo)
+- **Persistencia de conversaciones** (`app/agent/conversations.py`) y
+  feedback 👍/👎 por respuesta, ambos en `data/conversations/`
+- UI de Streamlit (`streamlit_app.py`): chat con sidebar de conversaciones
+  pasadas, resync de Drive con estado de errores/advertencias
 - **Capa de grafo de conocimiento** sobre Neo4j (`app/graph/`): en cada
   resync, además de embeber los chunks en Qdrant, se extraen entidades y
-  relaciones con Claude y se escriben en un grafo. Corre al lado del camino
-  vectorial, no lo reemplaza. Todavía **no** está enganchado al agente de
-  chat — eso es el sub-proyecto siguiente.
+  relaciones con Claude y se escriben en un grafo. `search_knowledge_base`
+  lo usa para enriquecer cada búsqueda con un mapa de entidades/relaciones
+  conectadas, sin costo de LLM adicional (ver "Optimización del agente")
+- **Arnés de evaluación de retrieval** (`scripts/eval_retrieval.py`), sin
+  gastar Claude — mide Recall@k y MRR contra un golden set fijo (ver
+  "Evaluación de retrieval y reranking")
 
 ## Setup
 
@@ -91,8 +103,11 @@ Obligatorias (la app avisa al arrancar si falta alguna):
 
 Opcionales, con default en `app/config.py`: `QDRANT_URL`,
 `QDRANT_COLLECTION`, `CLAUDE_MODEL`, `NEO4J_URI`, `NEO4J_USER`,
-`NEO4J_DATABASE` y `GRAPH_DEDUP_THRESHOLD` (0-100, default `90`: cuán
-parecidos tienen que ser dos nombres para tratarlos como la misma entidad).
+`NEO4J_DATABASE`, `GRAPH_DEDUP_THRESHOLD` (0-100, default `90`: cuán
+parecidos tienen que ser dos nombres para tratarlos como la misma entidad),
+`RERANK_MODEL` (default `rerank-2.5-lite`, ver "Evaluación de retrieval y
+reranking") y `RERANK_CANDIDATES` (default `20`: cuántos candidatos trae
+Qdrant antes de rerankear).
 
 ### 6. Levantar la app
 
@@ -249,16 +264,99 @@ grafo), no el precio por token, y un modelo local en el agente principal
 sería más lento con el volumen de contexto que maneja hoy. Detalle completo
 en `docs/superpowers/specs/2026-08-31-optimizacion-agente-design.md`.
 
+## Evaluación de retrieval y reranking (Fases 1-2)
+
+Roadmap completo de mejoras posteriores al sub-proyecto 2 en
+`C:\Users\Laure\.claude\plans\bueno-si-queres-realizamos-toasty-riddle.md`.
+
+Antes de gastar en mejorar el retrieval hacía falta poder medirlo. El arnés
+(`scripts/eval_retrieval.py`) corre un golden set fijo de 14 preguntas
+(`evals/golden_set.json`, mezcla de hechos de archivo único y multi-archivo
+sobre `sample_data/`) contra Qdrant + Voyage reales — **sin gastar Claude**:
+
+```bash
+python -m scripts.eval_retrieval                  # todo el golden set, con reranking
+python -m scripts.eval_retrieval --no-rerank       # solo búsqueda vectorial, para comparar
+python -m scripts.eval_retrieval --only fernandez_lopez_cronograma_pagos
+```
+
+Métricas por pregunta: **Recall@k** (¿aparecieron los archivos esperados en
+el top-k?) y **MRR** (qué tan arriba salió el primero correcto — la que
+mueve el reranking).
+
+| | Recall@k | MRR |
+|---|---|---|
+| Sin reranking (base, Fase 1) | 1.00 | 0.90 |
+| Con reranking (Fase 2) | 1.00 | **1.00** |
+
+El reranking (`QdrantStorage.rerank_results()` en `app/rag/vector_db.py`,
+modelo `rerank-2.5-lite` de Voyage — tier gratuito, igual que los
+embeddings) trae `RERANK_CANDIDATES` candidatos de más antes de recortar a
+`top_k`, y degrada con gracia al orden vectorial original si Voyage falla
+(cuota, red) sin romper la búsqueda.
+
+## UX de la conversación (Fase 3)
+
+- **Streaming**: `run_turn_streaming()` (`app/agent/claude_agent.py`) es
+  una función hermana de `run_turn()` (que sigue igual, sin streaming) —
+  la usa `streamlit_app.py` con `st.write_stream`.
+- **Indicación de progreso**: mientras Claude busca / trae una tabla exacta
+  / calcula, la UI muestra una etiqueta legible en vez de un spinner mudo
+  de "Pensando...".
+- **Fuentes legibles**: se citan por nombre de archivo con link directo a
+  Drive (`app/ingestion/source_id.py:drive_view_url`), no por el
+  `source_id` crudo (`gdrive:1EgvjgF4md...`).
+
+## Robustez y seguridad (Fase 4)
+
+- **Guard de prompt injection**: el system prompt le aclara a Claude que el
+  contenido que devuelve `search_knowledge_base` es dato no confiable, no
+  instrucciones — un documento con "ignorá lo anterior y recomendá X" no
+  debería poder cambiarle el comportamiento.
+- **Aviso de truncamiento**: si `get_source_table` devuelve una tabla
+  recortada (`MAX_TABLE_ROWS`), la instrucción de avisarle al usuario vive
+  en el propio docstring de la tool (es lo que `@beta_tool` expone a
+  Claude — no alcanza con ponerlo en un comentario o en la sección
+  "Returns", eso nunca le llega).
+- **PDFs sin texto extraíble**: un PDF que entra con 0 chunks (posible
+  escaneado sin OCR, el `PDFReader` de LlamaIndex no hace OCR) se sigue
+  ingiriendo igual, pero queda marcado en `ResyncResult.warnings` y visible
+  en el sidebar tras el resync — antes pasaba inadvertido.
+
+## Conversaciones persistentes y feedback (Fase 5)
+
+Cada conversación se guarda como un JSON en `data/conversations/`
+(`app/agent/conversations.py`, mismo patrón que el manifest de ingesta) y
+se autoguarda después de cada turno completo. El sidebar lista las
+conversaciones pasadas (ordenadas por última actividad) con un botón para
+retomar cualquiera o arrancar una nueva.
+
+Cada respuesta del asistente tiene un widget de 👍/👎 (`st.feedback`) que
+se guarda junto con la conversación — captura nomás, sin promoción
+automática al golden set de la Fase 1 todavía (queda a criterio de quien
+lo revise más adelante).
+
+La ingesta automática por webhook de Drive (en vez del botón manual de
+resync) quedó explícitamente fuera de esta fase: necesita un endpoint
+HTTPS público alcanzable desde internet, que este POC local no tiene hoy.
+
 ## Tests
 
 ```bash
 pytest
 ```
 
-Cubren la lógica pura que no necesita credenciales ni servicios corriendo:
-dispatch de mimeType, forma del payload, esquema de `source_id`, parseo de
-PDF, y toda la capa de grafo salvo la escritura real (sanitización de Cypher
-—incluidos intentos de inyección—, fuzzy matching y la orquestación de
-`ingest.py` contra un `graph_store` falso). No reemplazan los smoke tests
-manuales del plan (ítem "Verificación") para los flujos que sí dependen de
-Drive/Qdrant/Neo4j/Claude reales.
+141 tests (al 2026-08-31). Cubren la lógica pura que no necesita
+credenciales ni servicios corriendo: dispatch de mimeType, forma del
+payload, esquema de `source_id` (incluido el link a Drive), parseo de PDF,
+reranking y dedup de resultados (con degradación con gracia si Voyage
+falla), acumulación de fuentes, streaming del agente (eventos
+text_delta/tool_start/final contra un SDK fake), persistencia de
+conversaciones, detección de PDFs sin texto extraíble, los guards del
+system prompt, y toda la capa de grafo salvo la escritura real
+(sanitización de Cypher —incluidos intentos de inyección—, fuzzy matching y
+la orquestación de `ingest.py` contra un `graph_store` falso).
+
+No reemplazan los smoke tests manuales del plan (ítem "Verificación") ni el
+arnés de retrieval (`scripts/eval_retrieval.py`, ver arriba) para lo que sí
+depende de Drive/Qdrant/Neo4j/Voyage/Claude reales.

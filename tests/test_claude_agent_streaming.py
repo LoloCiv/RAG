@@ -59,8 +59,14 @@ class _FakeMessage:
 class _FakeStreamingToolRunner:
     def __init__(self, streams, **kwargs):
         self._streams = streams
+        # El tool_runner real NUNCA persiste en _params["messages"] el
+        # mensaje CON EL QUE TERMINA el turno (ver
+        # BaseSyncToolRunner.__run__ en _beta_runner.py -- next_step ==
+        # "stop" hace return directo sin append_messages()). Solo los
+        # rounds intermedios (todos menos el ultimo) quedan reflejados
+        # aca -- el terminal solo existe como last_message.
         self._params = {
-            "messages": [*kwargs.get("messages", []), *({"role": "assistant", "content": []} for _ in streams)]
+            "messages": [*kwargs.get("messages", []), *({"role": "assistant", "content": []} for _ in streams[:-1])]
         }
 
     def __iter__(self):

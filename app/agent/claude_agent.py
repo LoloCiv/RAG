@@ -175,14 +175,33 @@ def _new_messages_from_runner(runner, original_len: int, last_message) -> list[d
     venv/Lib/site-packages/anthropic/lib/tools/_beta_runner.py). Si un
     SDK futuro cambia esa forma interna, degradamos al comportamiento
     viejo (un solo mensaje con last_message.content) en vez de explotar.
+
+    OJO -- segunda vuelta de este bug, encontrada con una llamada real
+    (Tarea 4 del plan): BaseSyncToolRunner.__run__ (_beta_runner.py:
+    203-234) hace append_messages() para CADA ronda EXCEPTO la ultima --
+    cuando next_step == "stop" (el turno termino, ej. end_turn), hace
+    `return` directo sin persistir ese mensaje en self._params["messages"].
+    El mensaje final del turno (el que trae el texto de cierre Y, mas
+    grave, el/los code_execution_tool_result con el archivo generado)
+    SOLO existe como last_message -- nunca aparece en el slice de arriba.
+    Sin este append, un turno de una sola ronda (la mas comun) devolvia
+    new_messages == [] pese a haber respondido algo, y un turno con
+    programmatic tool calling perdia el mensaje que realmente contiene
+    el grafico. Confirmado con una llamada real: chart_paths quedaba
+    vacio y el texto de cierre ausente del historial persistido pese a
+    haberse mostrado completo via streaming.
     """
     try:
-        return list(runner._params["messages"][original_len:])
+        new_messages = list(runner._params["messages"][original_len:])
     except (AttributeError, KeyError, TypeError):
         logger.warning("No se pudo leer el historial completo del tool_runner, degradando a un solo mensaje")
         if last_message is None:
             return []
         return [{"role": "assistant", "content": last_message.content}]
+
+    if last_message is not None:
+        new_messages.append({"role": "assistant", "content": last_message.content})
+    return new_messages
 
 
 def _build_result(client: anthropic.Anthropic, last_message, new_messages: list[dict]) -> dict:

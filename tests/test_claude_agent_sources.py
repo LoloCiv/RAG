@@ -28,7 +28,12 @@ class _FakeMessage:
 
 class _FakeToolRunner:
     def __init__(self, *args, **kwargs):
-        self._params = {"messages": [*kwargs.get("messages", []), {"role": "assistant", "content": []}]}
+        # El tool_runner real NUNCA persiste en _params["messages"] el
+        # mensaje CON EL QUE TERMINA el turno (ver
+        # BaseSyncToolRunner.__run__ en _beta_runner.py -- next_step ==
+        # "stop" hace return directo) -- el unico round de este fake es
+        # ese mensaje terminal, asi que _params no debe incluirlo.
+        self._params = {"messages": [*kwargs.get("messages", [])]}
 
     def __iter__(self):
         return iter([_FakeMessage()])

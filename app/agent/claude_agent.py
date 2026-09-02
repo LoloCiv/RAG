@@ -162,6 +162,29 @@ def _readable_sources() -> list[dict]:
     ]
 
 
+def _new_messages_from_runner(runner, original_len: int, last_message) -> list[dict]:
+    """Todos los mensajes que el tool_runner agrego durante ESTE turno, en
+    orden -- no solo el ultimo. Ver docstring de
+    tests/test_claude_agent_history.py para el bug real que esto arregla
+    (400 "unexpected tool_use_id" en el turno siguiente).
+
+    No hay API publica que exponga el historial acumulado del runner --
+    accedemos a runner._params["messages"], el dict interno que el propio
+    runner arma y mantiene consistente en cada round-trip (ver
+    BaseSyncToolRunner.append_messages en
+    venv/Lib/site-packages/anthropic/lib/tools/_beta_runner.py). Si un
+    SDK futuro cambia esa forma interna, degradamos al comportamiento
+    viejo (un solo mensaje con last_message.content) en vez de explotar.
+    """
+    try:
+        return list(runner._params["messages"][original_len:])
+    except (AttributeError, KeyError, TypeError):
+        logger.warning("No se pudo leer el historial completo del tool_runner, degradando a un solo mensaje")
+        if last_message is None:
+            return []
+        return [{"role": "assistant", "content": last_message.content}]
+
+
 def _build_result(client: anthropic.Anthropic, last_message) -> dict:
     """Arma el dict de resultado final de un turno a partir del ultimo
     mensaje del runner. Compartido entre run_turn() y run_turn_streaming().

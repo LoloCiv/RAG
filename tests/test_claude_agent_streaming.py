@@ -59,6 +59,9 @@ class _FakeMessage:
 class _FakeStreamingToolRunner:
     def __init__(self, streams, **kwargs):
         self._streams = streams
+        self._params = {
+            "messages": [*kwargs.get("messages", []), *({"role": "assistant", "content": []} for _ in streams)]
+        }
 
     def __iter__(self):
         return iter(self._streams)
@@ -159,7 +162,12 @@ def test_el_ultimo_evento_es_final_con_el_resultado(monkeypatch):
     events = list(claude_agent.run_turn_streaming([{"role": "user", "content": "hola"}]))
 
     assert events[-1]["type"] == "final"
-    assert events[-1]["result"] == {"response_content": [], "answer_text": "", "sources": [], "chart_paths": []}
+    assert events[-1]["result"] == {
+        "new_messages": [{"role": "assistant", "content": []}],
+        "answer_text": "",
+        "sources": [],
+        "chart_paths": [],
+    }
 
 
 def test_evento_de_tipo_desconocido_no_rompe(monkeypatch):

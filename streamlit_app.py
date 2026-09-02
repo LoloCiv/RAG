@@ -232,9 +232,11 @@ if user_input:
             progress.empty()
 
             result = final_result
-            st.session_state.api_messages.append(
-                {"role": "assistant", "content": result["response_content"]}
-            )
+            # new_messages puede ser mas de un mensaje (varios round-trips
+            # reales en este turno, ej. programmatic tool calling) -- ver
+            # _new_messages_from_runner en claude_agent.py. Guardar solo
+            # un .append() del ultimo mensaje corrompia el historial.
+            st.session_state.api_messages.extend(result["new_messages"])
 
             answer_text = result.get("answer_text", "")
             sources = result.get("sources", [])

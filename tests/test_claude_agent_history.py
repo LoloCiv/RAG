@@ -87,3 +87,96 @@ def test_degrada_a_lista_vacia_sin_runner_params_ni_last_message():
     result = _new_messages_from_runner(_RunnerSinParams(), 1, None)
 
     assert result == []
+
+
+import app.agent.claude_agent as claude_agent
+
+
+class _FakeContentBlock:
+    def __init__(self, type_, text=None):
+        self.type = type_
+        self.text = text
+
+
+class _MultiRoundMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _MultiRoundFakeToolRunner:
+    """Simula un turno con DOS round-trips reales (ej. programmatic tool
+    calling): ronda 1 dice algo y llama una tool, ronda 2 sigue y
+    termina. El __iter__ yieldea las DOS -- like the real runner does."""
+
+    def __init__(self, *args, **kwargs):
+        self._ronda1 = _MultiRoundMessage([_FakeContentBlock("text", "Encontre la planilla, calculando...")])
+        self._ronda2 = _MultiRoundMessage([_FakeContentBlock("text", "Listo, el resultado es 42.")])
+        self._params = {
+            "messages": [
+                *kwargs.get("messages", []),
+                {"role": "assistant", "content": self._ronda1.content},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]},
+                {"role": "assistant", "content": self._ronda2.content},
+            ]
+        }
+
+    def __iter__(self):
+        return iter([self._ronda1, self._ronda2])
+
+
+class _FakeBetaMessagesMultiRound:
+    def tool_runner(self, **kwargs):
+        return _MultiRoundFakeToolRunner(**kwargs)
+
+
+class _FakeBetaMultiRound:
+    def __init__(self):
+        self.messages = _FakeBetaMessagesMultiRound()
+
+
+class _FakeAnthropicClientMultiRound:
+    def __init__(self, *args, **kwargs):
+        self.beta = _FakeBetaMultiRound()
+
+
+class _FakeQdrantStorage:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+class _FakeGraphStore:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_run_turn_conserva_texto_de_todas_las_rondas_no_solo_la_ultima(monkeypatch):
+    monkeypatch.setattr(claude_agent.anthropic, "Anthropic", _FakeAnthropicClientMultiRound)
+    monkeypatch.setattr(claude_agent.vector_db, "QdrantStorage", _FakeQdrantStorage)
+    monkeypatch.setattr(claude_agent, "Neo4jGraphStore", _FakeGraphStore)
+    monkeypatch.setattr(claude_agent, "_init_tools", lambda store, graph_store=None: None)
+
+    result = claude_agent.run_turn([{"role": "user", "content": "hola"}])
+
+    # Antes del fix esto daba solo "Listo, el resultado es 42." -- la
+    # narracion de la ronda 1 se perdia porque solo se guardaba
+    # last_message.content.
+    assert "Encontre la planilla" in result["answer_text"]
+    assert "Listo, el resultado es 42" in result["answer_text"]
+
+
+def test_run_turn_new_messages_incluye_las_tres_entradas_del_turno(monkeypatch):
+    monkeypatch.setattr(claude_agent.anthropic, "Anthropic", _FakeAnthropicClientMultiRound)
+    monkeypatch.setattr(claude_agent.vector_db, "QdrantStorage", _FakeQdrantStorage)
+    monkeypatch.setattr(claude_agent, "Neo4jGraphStore", _FakeGraphStore)
+    monkeypatch.setattr(claude_agent, "_init_tools", lambda store, graph_store=None: None)
+
+    result = claude_agent.run_turn([{"role": "user", "content": "hola"}])
+
+    # 2 assistant + 1 user(tool_result) -- si esto colapsara a 1 solo
+    # mensaje (el bug viejo), el historial que se persiste y se
+    # reenvia a la API en el proximo turno quedaria roto.
+    assert len(result["new_messages"]) == 3
+    assert [m["role"] for m in result["new_messages"]] == ["assistant", "user", "assistant"]

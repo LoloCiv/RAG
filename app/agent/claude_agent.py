@@ -185,18 +185,32 @@ def _new_messages_from_runner(runner, original_len: int, last_message) -> list[d
         return [{"role": "assistant", "content": last_message.content}]
 
 
-def _build_result(client: anthropic.Anthropic, last_message) -> dict:
-    """Arma el dict de resultado final de un turno a partir del ultimo
-    mensaje del runner. Compartido entre run_turn() y run_turn_streaming().
+def _build_result(client: anthropic.Anthropic, last_message, new_messages: list[dict]) -> dict:
+    """Arma el dict de resultado final de un turno a partir de TODOS los
+    mensajes nuevos que agrego el tool_runner durante este turno (no solo
+    el ultimo -- ver _new_messages_from_runner). Compartido entre
+    run_turn() y run_turn_streaming().
     """
     if last_message is None:
-        return {"response_content": [], "answer_text": "", "sources": [], "chart_paths": []}
+        return {"new_messages": [], "answer_text": "", "sources": [], "chart_paths": []}
 
-    answer_text = _extract_text_from_content(last_message.content)
-    chart_paths = files.save_generated_files(client, last_message.content)
+    # Texto y charts: recorrer los bloques de TODOS los mensajes de
+    # assistant nuevos (puede haber mas de uno si el turno disparo varios
+    # round-trips reales -- ej. programmatic tool calling), no solo el
+    # ultimo. Si no, se pierde narracion intermedia ("Encontre la
+    # planilla, calculando...") y charts generados en una ronda que no
+    # fue la final.
+    assistant_blocks = [
+        block
+        for m in new_messages
+        if m.get("role") == "assistant"
+        for block in (m.get("content") or [])
+    ]
+    answer_text = _extract_text_from_content(assistant_blocks)
+    chart_paths = files.save_generated_files(client, assistant_blocks)
 
     return {
-        "response_content": last_message.content,
+        "new_messages": new_messages,
         "answer_text": answer_text,
         "sources": _readable_sources(),
         "chart_paths": chart_paths,
@@ -212,13 +226,16 @@ def run_turn(message_history: list[dict]) -> dict:
 
     Returns:
         dict con:
-            - response_content: Los bloques de contenido del último mensaje (para el historial)
+            - new_messages: TODOS los mensajes nuevos que agrego este
+              turno (uno o mas round-trips -- ver _new_messages_from_runner),
+              para extender message_history antes del proximo turno
             - answer_text: Texto concatenado de la respuesta (para mostrar)
             - sources: Lista de {"source_id", "file_name", "drive_url"} usados en búsquedas
             - chart_paths: Paths locales de gráficos generados
     """
     store, graph_store = _init_turn()
     client = anthropic.Anthropic()
+    original_len = len(message_history)
 
     try:
         # cache_control: el contenido de tool results se reenvia completo en
@@ -233,7 +250,8 @@ def run_turn(message_history: list[dict]) -> dict:
         for message in runner:
             last_message = message
 
-        return _build_result(client, last_message)
+        new_messages = _new_messages_from_runner(runner, original_len, last_message)
+        return _build_result(client, last_message, new_messages)
     finally:
         if graph_store is not None:
             graph_store.close()
@@ -276,6 +294,7 @@ def run_turn_streaming(message_history: list[dict]):
     """
     store, graph_store = _init_turn()
     client = anthropic.Anthropic()
+    original_len = len(message_history)
 
     try:
         runner = client.beta.messages.tool_runner(stream=True, **_tool_runner_kwargs(message_history))
@@ -293,7 +312,8 @@ def run_turn_streaming(message_history: list[dict]):
                             yield {"type": "tool_start", "label": _tool_progress_label(tool_name)}
                 last_message = stream.get_final_message()
 
-        yield {"type": "final", "result": _build_result(client, last_message)}
+        new_messages = _new_messages_from_runner(runner, original_len, last_message)
+        yield {"type": "final", "result": _build_result(client, last_message, new_messages)}
     finally:
         if graph_store is not None:
             graph_store.close()

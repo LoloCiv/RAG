@@ -21,6 +21,7 @@ class _FakeMessage:
 class _FakeToolRunner:
     def __init__(self, captured_kwargs: dict, **kwargs):
         captured_kwargs.update(kwargs)
+        self._params = {"messages": [*kwargs.get("messages", []), {"role": "assistant", "content": []}]}
 
     def __iter__(self):
         return iter([_FakeMessage()])

@@ -19,14 +19,11 @@ DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
 DATA_DIR = PROJECT_ROOT / "data"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 CHART_OUTPUTS_DIR = DATA_DIR / "chart_outputs"
-# Fase 5 (persistencia de conversaciones): un JSON por conversacion, mismo
-# patron que manifest.json -- ver app/agent/conversations.py.
-CONVERSATIONS_DIR = DATA_DIR / "conversations"
 QUERIES_DIR = DATA_DIR / "queries"
 GOOGLE_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 GOOGLE_TOKEN_PATH = PROJECT_ROOT / "token.json"
 
-for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, CONVERSATIONS_DIR, QUERIES_DIR):
+for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, QUERIES_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 # --- API keys / conexiones ---

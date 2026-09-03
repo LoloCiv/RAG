@@ -26,6 +26,9 @@ def _patch_pdf_loaders(monkeypatch, chunks: list[str]):
     monkeypatch.setattr(pipeline_module, "load_and_chunk_pdf_bytes", lambda pdf_bytes, name: chunks)
     monkeypatch.setattr(pipeline_module, "load_pdf_full_text", lambda pdf_bytes, name: "\n".join(chunks))
     monkeypatch.setattr(pipeline_module.graph_ingest, "sync_document_graph", lambda *a, **k: None)
+    # El test valida el warning del loader, no Voyage; una llamada real vuelve
+    # la suite dependiente de red y consume credito sin probar nada adicional.
+    monkeypatch.setattr(pipeline_module.embeddings, "embed_texts", lambda texts: [[0.0] for _ in texts])
 
 
 def test_pdf_sin_chunks_devuelve_warning(monkeypatch):

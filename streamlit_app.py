@@ -9,6 +9,10 @@ from app.config import GOOGLE_DRIVE_FOLDER_ID, require_env
 from app.graph.neo4j_client import Neo4jGraphStore
 from app.ingestion import manifest, pipeline
 from app.logging_conf import setup_logging
+from app.operations import work_items
+from app.operations.metrics import summarize_work_items
+from app.operations.providers import ClaudeOperationsProvider
+from app.operations.service import generate_draft
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -27,6 +31,30 @@ def graph_stats() -> dict:
 
 if "viewing_id" not in st.session_state:
     st.session_state.viewing_id = None
+if "viewing_work_item_id" not in st.session_state:
+    st.session_state.viewing_work_item_id = None
+
+with st.sidebar:
+    st.header("Operaciones comerciales")
+    _work_items = work_items.list_work_items()
+    for _item in _work_items:
+        _label = f"{_item['supplier_name']} · {_item['event_name'] or 'sin evento'}"
+        _active = _item["id"] == st.session_state.viewing_work_item_id
+        if st.button(("📌 " if _active else "") + _label, key=f"work_{_item['id']}", use_container_width=True):
+            st.session_state.viewing_work_item_id = _item["id"]
+            st.rerun()
+    with st.expander("Indicadores del piloto"):
+        _operations_metrics = summarize_work_items(_work_items)
+        st.metric("Work items", _operations_metrics["total"])
+        if _operations_metrics["average_seconds_to_draft"] is not None:
+            st.metric("Promedio hasta borrador", f"{_operations_metrics['average_seconds_to_draft'] / 60:.1f} min")
+        if _operations_metrics["average_seconds_to_resolution"] is not None:
+            st.metric("Promedio hasta resolución", f"{_operations_metrics['average_seconds_to_resolution'] / 60:.1f} min")
+        if _operations_metrics["approval_without_edit_rate"] is not None:
+            st.metric("Aprobados sin edición", f"{_operations_metrics['approval_without_edit_rate']:.0%}")
+        if _operations_metrics["external_actions_without_approval"]:
+            st.error("Hay entregas sin aprobación en la auditoría.")
+    st.divider()
 
 with st.sidebar:
     st.header("Consultas recientes")
@@ -76,7 +104,7 @@ with st.sidebar:
             st.dataframe([{"archivo": item["file_name"], "tipo": item["mime_type"].split(".")[-1], "ultima ingesta": item["last_ingested_at"]} for item in _manifest.values()], hide_index=True, use_container_width=True)
 
 st.title("📋 Agente de Eventos (POC)")
-st.caption("Mandá tu consulta sobre eventos, presupuestos y proveedores. Cada consulta es independiente.")
+st.caption("Bandeja de operaciones y consultas con evidencia sobre eventos, presupuestos y proveedores.")
 
 
 def _render_sources(sources: list[dict]) -> None:
@@ -107,6 +135,78 @@ def _render_query(record: dict, include_text: bool = True) -> None:
     if new_feedback != record.get("feedback"):
         queries.set_feedback(record["id"], new_feedback)
         record["feedback"] = new_feedback
+
+
+def _render_work_item(record: dict) -> None:
+    """Hace visible la evidencia y separa propuesta, aprobacion y envio externo."""
+    st.subheader(f"{record['supplier_name']} · {record['event_name'] or 'Sin evento'}")
+    st.caption(f"Canal: {record['channel']} · Estado: `{record['status']}`")
+    for message in record["messages"]:
+        with st.chat_message("user" if message["direction"] == "inbound" else "assistant"):
+            st.write(message["text"])
+            st.caption(message["received_at"])
+
+    if record.get("evidence"):
+        with st.expander("Evidencia usada para el borrador", expanded=False):
+            st.write(record["evidence"].get("answer_text", ""))
+            if record["evidence"].get("sources"):
+                _render_sources(record["evidence"]["sources"])
+
+    if record["status"] == "needs_review":
+        if not record.get("draft"):
+            if st.button("Generar borrador con evidencia", type="primary", key=f"generate_{record['id']}"):
+                with st.spinner("Buscando evidencia y preparando borrador..."):
+                    try:
+                        generate_draft(record["id"], ClaudeOperationsProvider())
+                        st.rerun()
+                    except Exception as error:
+                        logger.exception("Fallo la generacion del borrador")
+                        st.error(f"No se pudo generar el borrador: {error}")
+            return
+
+        edited_text = st.text_area("Borrador para revisar", value=record["draft"]["text"], height=180, key=f"draft_{record['id']}")
+        actor = st.text_input("Quién revisa", value="Operaciones", key=f"actor_{record['id']}")
+        evidence_verified = st.checkbox(
+            "Revisé la evidencia y sus fuentes antes de aprobar",
+            key=f"evidence_{record['id']}",
+        )
+        save_col, approve_col, reject_col = st.columns(3)
+        if save_col.button("Guardar edición", key=f"save_{record['id']}"):
+            work_items.edit_draft(record["id"], edited_text, actor)
+            st.rerun()
+        if approve_col.button("Aprobar envío", type="primary", key=f"approve_{record['id']}", disabled=not evidence_verified):
+            try:
+                if edited_text != record["draft"]["text"]:
+                    work_items.edit_draft(record["id"], edited_text, actor)
+                work_items.approve_work_item(record["id"], actor, evidence_verified=True)
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+        reason = st.text_input("Motivo de rechazo", key=f"reason_{record['id']}")
+        if reject_col.button("Rechazar", key=f"reject_{record['id']}"):
+            try:
+                work_items.reject_work_item(record["id"], actor, reason or "Requiere cambios")
+                st.rerun()
+            except ValueError as error:
+                st.error(str(error))
+        return
+
+    if record.get("draft"):
+        st.markdown("**Borrador aprobado**")
+        st.write(record["draft"]["text"])
+    if record["status"] == "approved":
+        st.info("Aprobado: n8n puede tomar este envío pendiente. La aplicación no envía mensajes directamente.")
+    elif record["status"] == "rejected":
+        st.warning("Rechazado: " + record.get("rejection_reason", "Sin motivo registrado"))
+    elif record["status"] == "sent":
+        st.success("Enviado por n8n: " + record.get("delivery", {}).get("external_message_id", "sin id externo"))
+
+
+if st.session_state.viewing_work_item_id:
+    _work_item = work_items.load_work_item(st.session_state.viewing_work_item_id)
+    if _work_item:
+        _render_work_item(_work_item)
+        st.divider()
 
 
 with st.form("query_form", clear_on_submit=True):

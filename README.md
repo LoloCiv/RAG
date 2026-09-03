@@ -1,9 +1,8 @@
 # Events RAG POC
 
-Agente conversacional sobre el Google Drive de una empresa de eventos
-(historial de eventos, presupuestos, proveedores), con capacidad de generar
-gráficos a partir de datos reales. Ver el diseño completo en el plan:
-`C:\Users\Laure\.claude\plans\me-gustaria-hacer-la-mutable-pixel.md`.
+Asistente de operaciones sobre el Google Drive de una empresa de eventos
+(historial de eventos, presupuestos, proveedores), con respuestas citadas,
+gráficos y una bandeja revisable para comunicaciones con proveedores.
 
 ## Que esta implementado
 
@@ -21,10 +20,13 @@ gráficos a partir de datos reales. Ver el diseño completo en el plan:
 - **Streaming** de la respuesta (`run_turn_streaming`) con indicación de
   progreso durante tool calls largos, y fuentes citadas como nombre de
   archivo + link a Drive (no el `source_id` crudo)
-- **Persistencia de conversaciones** (`app/agent/conversations.py`) y
-  feedback 👍/👎 por respuesta, ambos en `data/conversations/`
-- UI de Streamlit (`streamlit_app.py`): chat con sidebar de conversaciones
-  pasadas, resync de Drive con estado de errores/advertencias
+- **Buzón de consultas** persistente (`data/queries/`), con citas opcionales
+  de consultas anteriores y feedback por respuesta
+- **Bandeja de operaciones comerciales** (`data/work_items/`): conserva
+  mensaje entrante, evidencia, borrador, revisión de fuentes, aprobación,
+  entrega y auditoría
+- Webhook autenticado para n8n (`app/webhook_server.py`): n8n ingiere y
+  confirma envíos; la app nunca envía email ni WhatsApp directamente
 - **Capa de grafo de conocimiento** sobre Neo4j (`app/graph/`): en cada
   resync, además de embeber los chunks en Qdrant, se extraen entidades y
   relaciones con Claude y se escriben en un grafo. `search_knowledge_base`
@@ -100,14 +102,16 @@ Obligatorias (la app avisa al arrancar si falta alguna):
 | `VOYAGE_API_KEY` | embeddings |
 | `GOOGLE_DRIVE_FOLDER_ID` | carpeta a sincronizar (se ve en su URL) |
 | `NEO4J_PASSWORD` | tiene que coincidir con el `NEO4J_AUTH` del `docker run` |
+| `N8N_WEBHOOK_TOKEN` | Bearer token para el webhook local de operaciones |
 
 Opcionales, con default en `app/config.py`: `QDRANT_URL`,
 `QDRANT_COLLECTION`, `CLAUDE_MODEL`, `NEO4J_URI`, `NEO4J_USER`,
 `NEO4J_DATABASE`, `GRAPH_DEDUP_THRESHOLD` (0-100, default `90`: cuán
 parecidos tienen que ser dos nombres para tratarlos como la misma entidad),
 `RERANK_MODEL` (default `rerank-2.5-lite`, ver "Evaluación de retrieval y
-reranking") y `RERANK_CANDIDATES` (default `20`: cuántos candidatos trae
-Qdrant antes de rerankear).
+reranking"), `RERANK_CANDIDATES` (default `20`: cuántos candidatos trae
+Qdrant antes de rerankear), `EXTRACTION_MODEL` y `OPERATIONS_MODEL`
+(ambos Haiku por defecto para extracción, clasificación y borradores).
 
 ### 6. Levantar la app
 
@@ -118,6 +122,35 @@ streamlit run streamlit_app.py
 La primera vez que uses "Resincronizar Google Drive" se va a abrir el
 navegador para el consentimiento OAuth (una sola vez, el token queda
 cacheado en `token.json`).
+
+### 7. Integración del piloto con n8n
+
+Iniciá el webhook en otra terminal:
+
+```bash
+venv\Scripts\python.exe -m app.webhook_server
+```
+
+n8n conserva las credenciales de Gmail o WhatsApp Business Cloud y llama al
+servidor local con `Authorization: Bearer <N8N_WEBHOOK_TOKEN>`:
+
+- `POST /n8n/inbound`: recibe un mensaje normalizado con `message_id`,
+  `channel` (`email` o `whatsapp`), `supplier_name` y `text`; también acepta
+  `event_name`, `thread_key`, `received_at` y `attachments`.
+- `GET /n8n/outbox`: devuelve solo work items aprobados y pendientes.
+- `POST /n8n/outbox/{id}/sent`: n8n confirma el envío con
+  `external_message_id` después de que el canal lo aceptó.
+- `POST /n8n/outbox/{id}/failed`: registra un error recuperable de entrega.
+
+El flujo seguro es: mensaje entrante → borrador con evidencia → edición y
+revisión explícita de fuentes y aprobación humana en Streamlit → n8n toma el
+work item → confirmación de envío. No hay una ruta que saltee la aprobación
+humana, ni se aprueba un item sin texto de borrador.
+
+El panel "Indicadores del piloto" muestra tiempos hasta borrador/resolución,
+tasa de aprobación sin edición y detecta en la auditoría cualquier entrega
+que carezca de una aprobación previa. La corrección semántica de las fuentes
+queda deliberadamente como revisión humana, registrada antes de aprobar.
 
 ## Cómo funciona la capa de grafo (`app/graph/`)
 
@@ -343,10 +376,10 @@ HTTPS público alcanzable desde internet, que este POC local no tiene hoy.
 ## Tests
 
 ```bash
-pytest
+venv\Scripts\python.exe -m pytest -q
 ```
 
-141 tests (al 2026-08-31). Cubren la lógica pura que no necesita
+197 tests (al 2026-09-03). Cubren la lógica pura que no necesita
 credenciales ni servicios corriendo: dispatch de mimeType, forma del
 payload, esquema de `source_id` (incluido el link a Drive), parseo de PDF,
 reranking y dedup de resultados (con degradación con gracia si Voyage

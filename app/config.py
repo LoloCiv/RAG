@@ -20,10 +20,11 @@ DATA_DIR = PROJECT_ROOT / "data"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 CHART_OUTPUTS_DIR = DATA_DIR / "chart_outputs"
 QUERIES_DIR = DATA_DIR / "queries"
+WORK_ITEMS_DIR = DATA_DIR / "work_items"
 GOOGLE_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 GOOGLE_TOKEN_PATH = PROJECT_ROOT / "token.json"
 
-for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, QUERIES_DIR):
+for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, QUERIES_DIR, WORK_ITEMS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 # --- API keys / conexiones ---
@@ -32,6 +33,7 @@ VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "events_kb")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")
 
 # --- Grafo de conocimiento (Neo4j) ---
 # Bolt es el protocolo binario que usa el driver Python; el browser de Neo4j
@@ -78,6 +80,9 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 # La extraccion estructurada no usa programmatic tool calling; Haiku reduce
 # el costo sin quitar capacidades que este camino necesite.
 EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-haiku-4-5-20251001")
+# Clasificar y redactar mensajes no necesita el loop de herramientas del
+# agente; separar este modelo evita pagar razonamiento complejo por rutina.
+OPERATIONS_MODEL = os.getenv("OPERATIONS_MODEL", "claude-haiku-4-5-20251001")
 # voyage-4-lite (no voyage-large-2): los modelos "voyage-4*" tienen 200M
 # tokens gratis por mes -- voyage-large-2 es un modelo legacy que Voyage
 # excluyo explicitamente de esa franquicia gratuita, asi que para un POC
@@ -135,3 +140,8 @@ def require_env() -> list[str]:
     if not NEO4J_PASSWORD:
         missing.append("NEO4J_PASSWORD")
     return missing
+
+
+def require_webhook_env() -> list[str]:
+    """El webhook solo admite eventos autenticados porque abre datos comerciales."""
+    return ["N8N_WEBHOOK_TOKEN"] if not N8N_WEBHOOK_TOKEN else []

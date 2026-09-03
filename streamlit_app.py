@@ -4,7 +4,7 @@ import logging
 
 import streamlit as st
 
-from app.agent import claude_agent, queries
+from app.agent import inbox, queries
 from app.config import GOOGLE_DRIVE_FOLDER_ID, require_env
 from app.graph.neo4j_client import Neo4jGraphStore
 from app.ingestion import manifest, pipeline
@@ -109,10 +109,24 @@ def _render_query(record: dict, include_text: bool = True) -> None:
         record["feedback"] = new_feedback
 
 
-user_input = st.chat_input("Escribí tu pregunta...")
-if user_input:
+with st.form("query_form", clear_on_submit=True):
+    _recent = queries.list_queries()
+    _titles = {query["id"]: query["title"] for query in _recent}
+    references = st.multiselect(
+        "Citar consultas anteriores (opcional)",
+        options=list(_titles),
+        format_func=lambda query_id: _titles[query_id],
+    )
+    question = st.text_area(
+        "Tu consulta",
+        height=120,
+        placeholder="Preguntá sobre eventos, presupuestos y proveedores…",
+    )
+    submitted = st.form_submit_button("Enviar consulta", type="primary")
+
+if submitted and question.strip():
     with st.chat_message("user"):
-        st.write(user_input)
+        st.write(question)
     with st.chat_message("assistant"):
         progress = st.empty()
         progress.markdown("*Pensando...*")
@@ -120,14 +134,14 @@ if user_input:
 
         def _stream_answer_text():
             saved_record = None
-            for event in claude_agent.run_turn_streaming([{"role": "user", "content": user_input}]):
+            for event in inbox.ask_streaming(question, references=references or None):
                 if event["type"] == "text_delta":
                     progress.empty()
                     yield event["text"]
                 elif event["type"] == "tool_start":
                     progress.markdown(f"*{event['label']}*")
                 elif event["type"] == "final":
-                    saved_record = queries.save_query(queries.new_query_id(), user_input, event["result"])
+                    saved_record = event["record"]
             final_record.update(saved_record or {})
 
         try:

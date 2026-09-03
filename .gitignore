@@ -2,6 +2,7 @@
 .env
 credentials.json
 token.json
+.streamlit/secrets.toml
 
 # Datos locales generados
 /downloads/
@@ -14,6 +15,8 @@ token.json
 !/data/queries/.gitkeep
 /data/work_items/*
 !/data/work_items/.gitkeep
+/data/collaboration.sqlite3
+/data/collaboration.sqlite3-*
 
 # Python
 __pycache__/

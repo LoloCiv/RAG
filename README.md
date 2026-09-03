@@ -156,6 +156,19 @@ tasa de aprobación sin edición y detecta en la auditoría cualquier entrega
 que carezca de una aprobación previa. La corrección semántica de las fuentes
 queda deliberadamente como revisión humana, registrada antes de aprobar.
 
+### 8. Memoria compartida de correo
+
+El piloto colaborativo usa correo corporativo en modo lectura: cada persona
+etiqueta los mensajes que quiere compartir como `Evento/<slug>`, n8n los
+sincroniza periódicamente y el equipo confirma el evento antes de que formen
+parte de la timeline o de un resumen. El workflow y el contrato detallado
+están en [docs/n8n-gmail-pilot.md](docs/n8n-gmail-pilot.md).
+
+Para el servidor privado, copiar `.streamlit/secrets.toml.example` a
+`.streamlit/secrets.toml`, completar OAuth de Google y definir
+`AUTH_REQUIRED=true` y `ALLOWED_EMAIL_DOMAIN=empresa.com`. En desarrollo
+local la autenticación permanece explícitamente desactivada por defecto.
+
 ## Cómo funciona la capa de grafo (`app/graph/`)
 
 Por cada documento que el resync detecta nuevo o cambiado, además del camino

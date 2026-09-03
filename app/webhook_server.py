@@ -14,7 +14,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from app.config import N8N_WEBHOOK_TOKEN, WORK_ITEMS_DIR, require_webhook_env
+from app.collaboration.store import EventStore
+from app.config import COLLABORATION_DB_PATH, ENABLE_OUTBOUND, N8N_WEBHOOK_TOKEN, WORK_ITEMS_DIR, require_webhook_env
 from app.operations import work_items
 
 
@@ -33,13 +34,27 @@ async def inbound(request: Request) -> JSONResponse:
     return JSONResponse(record, status_code=201)
 
 
+async def email_inbound(request: Request) -> JSONResponse:
+    """Incorpora correo autorizado como memoria; no genera ni envia respuestas."""
+    _require_token(request)
+    try:
+        record = EventStore(COLLABORATION_DB_PATH).ingest_email(await request.json())
+    except (ValueError, TypeError) as error:
+        raise HTTPException(422, str(error)) from error
+    return JSONResponse(record, status_code=201)
+
+
 async def outbox(request: Request) -> JSONResponse:
     _require_token(request)
+    if not ENABLE_OUTBOUND:
+        raise HTTPException(404, "Los envios externos estan deshabilitados en este piloto")
     return JSONResponse({"items": work_items.list_delivery_candidates(WORK_ITEMS_DIR)})
 
 
 async def sent(request: Request) -> JSONResponse:
     _require_token(request)
+    if not ENABLE_OUTBOUND:
+        raise HTTPException(404, "Los envios externos estan deshabilitados en este piloto")
     try:
         payload = await request.json()
         record = work_items.mark_delivery_sent(request.path_params["work_item_id"], payload["external_message_id"], WORK_ITEMS_DIR)
@@ -50,6 +65,8 @@ async def sent(request: Request) -> JSONResponse:
 
 async def failed(request: Request) -> JSONResponse:
     _require_token(request)
+    if not ENABLE_OUTBOUND:
+        raise HTTPException(404, "Los envios externos estan deshabilitados en este piloto")
     try:
         payload = await request.json()
         record = work_items.mark_delivery_failed(request.path_params["work_item_id"], payload["error"], WORK_ITEMS_DIR)
@@ -60,6 +77,7 @@ async def failed(request: Request) -> JSONResponse:
 
 app = Starlette(routes=[
     Route("/n8n/inbound", inbound, methods=["POST"]),
+    Route("/n8n/email/inbound", email_inbound, methods=["POST"]),
     Route("/n8n/outbox", outbox, methods=["GET"]),
     Route("/n8n/outbox/{work_item_id}/sent", sent, methods=["POST"]),
     Route("/n8n/outbox/{work_item_id}/failed", failed, methods=["POST"]),

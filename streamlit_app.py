@@ -5,7 +5,10 @@ import logging
 import streamlit as st
 
 from app.agent import inbox, queries
-from app.config import GOOGLE_DRIVE_FOLDER_ID, require_env
+from app.config import ALLOWED_EMAIL_DOMAIN, AUTH_REQUIRED, COLLABORATION_DB_PATH, DEVELOPMENT_ACTOR_EMAIL, GOOGLE_DRIVE_FOLDER_ID, require_env
+from app.collaboration.auth import require_allowed_email
+from app.collaboration.context import build_event_context
+from app.collaboration.store import EventStore
 from app.graph.neo4j_client import Neo4jGraphStore
 from app.ingestion import manifest, pipeline
 from app.logging_conf import setup_logging
@@ -37,6 +40,28 @@ st.markdown(
 )
 
 
+def _current_actor_email() -> str:
+    """Exige Workspace en servidor y conserva un modo explícito para desarrollo local."""
+    if not AUTH_REQUIRED:
+        return DEVELOPMENT_ACTOR_EMAIL
+    if not getattr(st.user, "is_logged_in", False):
+        st.title("Centro de Conocimiento")
+        st.info("Ingresá con tu cuenta corporativa para acceder al espacio compartido.")
+        if st.button("Ingresar con Google"):
+            st.login()
+        st.stop()
+    try:
+        return require_allowed_email(getattr(st.user, "email", None), ALLOWED_EMAIL_DOMAIN)
+    except PermissionError as error:
+        st.error(str(error))
+        if st.button("Cerrar sesión"):
+            st.logout()
+        st.stop()
+
+
+CURRENT_ACTOR_EMAIL = _current_actor_email()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def graph_stats() -> dict:
     """Neo4j puede degradar sin romper el buzon, que conserva la busqueda vectorial."""
@@ -51,6 +76,25 @@ if "viewing_id" not in st.session_state:
     st.session_state.viewing_id = None
 if "viewing_work_item_id" not in st.session_state:
     st.session_state.viewing_work_item_id = None
+if "viewing_event_id" not in st.session_state:
+    st.session_state.viewing_event_id = None
+
+_event_store = EventStore(COLLABORATION_DB_PATH)
+
+with st.sidebar:
+    st.header("Eventos compartidos")
+    with st.form("create_event", clear_on_submit=True):
+        _event_name = st.text_input("Nuevo evento", placeholder="Ej.: Cena anual")
+        if st.form_submit_button("Crear evento", use_container_width=True) and _event_name.strip():
+            _created_event = _event_store.create_event(_event_name)
+            st.session_state.viewing_event_id = _created_event["id"]
+            st.rerun()
+    for _event in _event_store.list_events():
+        _active = _event["id"] == st.session_state.viewing_event_id
+        if st.button(("● " if _active else "") + _event["name"], key=f"event_{_event['id']}", use_container_width=True):
+            st.session_state.viewing_event_id = _event["id"]
+            st.rerun()
+    st.divider()
 
 with st.sidebar:
     st.header("Operaciones comerciales")
@@ -228,6 +272,39 @@ def _render_work_item(record: dict) -> None:
         st.success("Enviado por n8n: " + record.get("delivery", {}).get("external_message_id", "sin id externo"))
 
 
+def _render_event_space(event: dict) -> list[dict]:
+    """Hace visible qué correo ya es contexto confirmado y qué falta revisar."""
+    st.subheader(event["name"])
+    st.caption("Memoria compartida del evento · solo correo confirmado por el equipo")
+    timeline = _event_store.list_event_messages(event["id"])
+    pending = _event_store.list_suggested_messages(event["id"])
+    if pending:
+        with st.expander(f"{len(pending)} correo(s) sugerido(s) para revisar", expanded=True):
+            for message in pending:
+                st.markdown(f"**{message['subject']}** · {message['sender']}")
+                st.caption(message["received_at"])
+                if st.button("Confirmar para este evento", key=f"confirm_{message['id']}"):
+                    _event_store.confirm_event_message(event["id"], message["id"], CURRENT_ACTOR_EMAIL)
+                    st.rerun()
+    if not timeline:
+        st.info("Todavía no hay correo confirmado. n8n puede sugerirlo cuando detecte la etiqueta Evento/<nombre-del-evento>.")
+        return []
+    for message in timeline:
+        with st.container(border=True):
+            st.markdown(f"**{message['subject']}**")
+            st.caption(f"{message['sender']} · {message['received_at']}")
+            st.write(message["body_text"])
+            if message.get("thread_url"):
+                st.link_button("Abrir hilo original", message["thread_url"])
+    return timeline
+
+
+_selected_event = next((event for event in _event_store.list_events() if event["id"] == st.session_state.viewing_event_id), None)
+_event_messages: list[dict] = []
+if _selected_event:
+    _event_messages = _render_event_space(_selected_event)
+    st.divider()
+
 if st.session_state.viewing_work_item_id:
     _work_item = work_items.load_work_item(st.session_state.viewing_work_item_id)
     if _work_item:
@@ -242,6 +319,8 @@ _other_queries = _recent[1:] if _recent else []
 with st.form("query_form", clear_on_submit=True):
     st.subheader("Nueva consulta")
     st.caption("La respuesta incluirá las fuentes que usó para que puedas verificarla.")
+    if _selected_event:
+        st.info(f"La consulta usará los {len(_event_messages)} correo(s) confirmado(s) de { _selected_event['name'] } como contexto.")
     continuing_latest = False
     if _latest_query:
         continuing_latest = st.checkbox(
@@ -276,6 +355,7 @@ with st.form("query_form", clear_on_submit=True):
 
 references = ([_latest_query["id"]] if _latest_query and continuing_latest else []) + additional_references
 response_mode = "fast" if response_mode_label == "Rápida" else "deep"
+event_context = build_event_context(_selected_event, _event_messages) if _selected_event and _event_messages else None
 
 if submitted and question.strip():
     with st.chat_message("user"):
@@ -287,7 +367,12 @@ if submitted and question.strip():
 
         def _stream_answer_text():
             saved_record = None
-            for event in inbox.ask_streaming(question, references=references or None, response_mode=response_mode):
+            for event in inbox.ask_streaming(
+                question,
+                references=references or None,
+                response_mode=response_mode,
+                additional_context=event_context,
+            ):
                 if event["type"] == "text_delta":
                     progress.empty()
                     yield event["text"]

@@ -21,6 +21,7 @@ def test_inbound_requires_bearer_token(tmp_path, monkeypatch):
 def test_inbound_approval_and_delivery_acknowledgement(tmp_path, monkeypatch):
     monkeypatch.setattr(webhook_server, "WORK_ITEMS_DIR", tmp_path)
     monkeypatch.setattr(webhook_server, "N8N_WEBHOOK_TOKEN", "pilot-secret")
+    monkeypatch.setattr(webhook_server, "ENABLE_OUTBOUND", True)
     client = TestClient(webhook_server.app)
     payload = {
         "message_id": "gmail-1",
@@ -40,3 +41,13 @@ def test_inbound_approval_and_delivery_acknowledgement(tmp_path, monkeypatch):
 
     assert pending.json()["items"][0]["id"] == work_item_id
     assert sent.json()["status"] == "sent"
+
+
+def test_outbox_is_disabled_by_default_for_shared_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(webhook_server, "WORK_ITEMS_DIR", tmp_path)
+    monkeypatch.setattr(webhook_server, "N8N_WEBHOOK_TOKEN", "pilot-secret")
+    monkeypatch.setattr(webhook_server, "ENABLE_OUTBOUND", False)
+
+    response = TestClient(webhook_server.app).get("/n8n/outbox", headers=_headers())
+
+    assert response.status_code == 404

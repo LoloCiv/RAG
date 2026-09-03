@@ -21,6 +21,7 @@ MANIFEST_PATH = DATA_DIR / "manifest.json"
 CHART_OUTPUTS_DIR = DATA_DIR / "chart_outputs"
 QUERIES_DIR = DATA_DIR / "queries"
 WORK_ITEMS_DIR = DATA_DIR / "work_items"
+COLLABORATION_DB_PATH = DATA_DIR / "collaboration.sqlite3"
 GOOGLE_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 GOOGLE_TOKEN_PATH = PROJECT_ROOT / "token.json"
 
@@ -34,6 +35,13 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "events_kb")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")
+# La memoria de correo es read-only en el piloto. Mantener este corte a nivel
+# servidor evita que una configuracion accidental de n8n habilite envios.
+ENABLE_OUTBOUND = os.getenv("ENABLE_OUTBOUND", "false").casefold() == "true"
+# Solo para desarrollo local antes de configurar la identidad Google Workspace.
+DEVELOPMENT_ACTOR_EMAIL = os.getenv("DEVELOPMENT_ACTOR_EMAIL", "operaciones@local")
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").casefold() == "true"
+ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "")
 
 # --- Grafo de conocimiento (Neo4j) ---
 # Bolt es el protocolo binario que usa el driver Python; el browser de Neo4j

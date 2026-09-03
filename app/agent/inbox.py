@@ -63,9 +63,17 @@ def _citations_for(references: list[str] | None, queries_dir: Path) -> list[dict
     return citations
 
 
-def ask(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR, response_mode: str = "deep") -> dict:
+def ask(
+    question: str,
+    references: list[str] | None = None,
+    queries_dir: Path = QUERIES_DIR,
+    response_mode: str = "deep",
+    additional_context: str | None = None,
+) -> dict:
     """Ejecuta un solo turno y guarda solo resultados completos."""
     prompt = build_prompt(question, _citations_for(references, queries_dir))
+    if additional_context:
+        prompt = f"{additional_context}\n\n{prompt}"
     started_at = time.perf_counter()
     if not _TURN_LOCK.acquire(timeout=_LOCK_TIMEOUT_S):
         raise RuntimeError("El buzón está procesando otra consulta. Reintentá en unos segundos.")
@@ -80,9 +88,17 @@ def ask(question: str, references: list[str] | None = None, queries_dir: Path = 
     return save_query(new_query_id(), question, result, references, queries_dir)
 
 
-def ask_streaming(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR, response_mode: str = "deep"):
+def ask_streaming(
+    question: str,
+    references: list[str] | None = None,
+    queries_dir: Path = QUERIES_DIR,
+    response_mode: str = "deep",
+    additional_context: str | None = None,
+):
     """Reenvia eventos parciales y cambia el evento final al contrato del buzon."""
     prompt = build_prompt(question, _citations_for(references, queries_dir))
+    if additional_context:
+        prompt = f"{additional_context}\n\n{prompt}"
     started_at = time.perf_counter()
     if not _TURN_LOCK.acquire(timeout=_LOCK_TIMEOUT_S):
         raise RuntimeError("El buzón está procesando otra consulta. Reintentá en unos segundos.")

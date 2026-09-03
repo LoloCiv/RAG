@@ -91,3 +91,18 @@ def test_ask_streaming_passes_fast_mode_to_agent(tmp_path, monkeypatch):
     list(inbox.ask_streaming("pregunta", queries_dir=tmp_path, response_mode="fast"))
 
     assert captured["response_mode"] == "fast"
+
+
+def test_ask_keeps_display_question_but_adds_event_context_to_agent_prompt(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake(history):
+        captured["prompt"] = history[0]["content"]
+        return _result("ok")
+
+    monkeypatch.setattr(inbox.claude_agent, "run_turn", fake)
+
+    record = inbox.ask("Qué acordamos?", queries_dir=tmp_path, additional_context="<event_context>correo</event_context>")
+
+    assert record["question"] == "Qué acordamos?"
+    assert "<event_context>correo</event_context>" in captured["prompt"]

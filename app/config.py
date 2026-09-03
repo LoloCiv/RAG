@@ -69,6 +69,10 @@ GRAPH_MAX_EDGES = int(os.getenv("GRAPH_MAX_EDGES", "40"))
 # a proposito, no vale la pena una llamada de tokenizer por busqueda.
 GRAPH_MAX_CHARS = int(os.getenv("GRAPH_MAX_CHARS", "1600"))
 
+# Citar varias respuestas completas puede inflar el prompt miles de tokens;
+# este techo usa la misma regla deliberada de ~4 caracteres por token.
+CITATION_MAX_CHARS = int(os.getenv("CITATION_MAX_CHARS", "2000"))
+
 # --- Modelos ---
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 # voyage-4-lite (no voyage-large-2): los modelos "voyage-4*" tienen 200M

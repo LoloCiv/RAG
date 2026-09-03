@@ -5,6 +5,7 @@ no se fabrican turnos previos que les den autoridad de instrucciones.
 """
 
 import logging
+import threading
 from pathlib import Path
 
 from app.agent import claude_agent
@@ -13,6 +14,12 @@ from app.config import CITATION_MAX_CHARS, QUERIES_DIR
 
 logger = logging.getLogger(__name__)
 _CITATION_TRUNCATION_MARK = "… [respuesta recortada]"
+
+# FastMCP ejecuta tools sync en worker threads y tools.py mantiene estado
+# global por turno. Para stdio conviene serializar el turno entero; antes de
+# exponer HTTP esto debe migrar a estado por contexto/request.
+_TURN_LOCK = threading.Lock()
+_LOCK_TIMEOUT_S = 180
 
 
 def _truncate_answer(answer_text: str) -> str:
@@ -58,18 +65,28 @@ def _citations_for(references: list[str] | None, queries_dir: Path) -> list[dict
 def ask(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR) -> dict:
     """Ejecuta un solo turno y guarda solo resultados completos."""
     prompt = build_prompt(question, _citations_for(references, queries_dir))
-    result = claude_agent.run_turn([{"role": "user", "content": prompt}])
+    if not _TURN_LOCK.acquire(timeout=_LOCK_TIMEOUT_S):
+        raise RuntimeError("El buzón está procesando otra consulta. Reintentá en unos segundos.")
+    try:
+        result = claude_agent.run_turn([{"role": "user", "content": prompt}])
+    finally:
+        _TURN_LOCK.release()
     return save_query(new_query_id(), question, result, references, queries_dir)
 
 
 def ask_streaming(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR):
     """Reenvia eventos parciales y cambia el evento final al contrato del buzon."""
     prompt = build_prompt(question, _citations_for(references, queries_dir))
-    result = None
-    for event in claude_agent.run_turn_streaming([{"role": "user", "content": prompt}]):
-        if event["type"] == "final":
-            result = event["result"]
-        else:
-            yield event
+    if not _TURN_LOCK.acquire(timeout=_LOCK_TIMEOUT_S):
+        raise RuntimeError("El buzón está procesando otra consulta. Reintentá en unos segundos.")
+    try:
+        result = None
+        for event in claude_agent.run_turn_streaming([{"role": "user", "content": prompt}]):
+            if event["type"] == "final":
+                result = event["result"]
+            else:
+                yield event
+    finally:
+        _TURN_LOCK.release()
     record = save_query(new_query_id(), question, result, references, queries_dir)
     yield {"type": "final", "record": record}

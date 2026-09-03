@@ -21,7 +21,7 @@ def test_save_query_returns_the_full_record_shape(tmp_path):
     query_id = new_query_id()
     result = _fake_result(answer_text="respuesta", sources=[{"file_name": "x.pdf"}], chart_paths=["chart.png"], new_messages=[{"role": "assistant", "content": "ok"}])
     record = save_query(query_id, "Cuanto gastamos?", result, queries_dir=tmp_path)
-    assert set(record) == {"id", "created_at", "title", "question", "references", "answer_text", "sources", "chart_paths", "feedback", "raw_messages"}
+    assert set(record) == {"id", "created_at", "title", "question", "references", "answer_text", "sources", "chart_paths", "feedback", "raw_messages", "elapsed_ms"}
     assert record["id"] == query_id
     assert record["question"] == "Cuanto gastamos?"
     assert record["answer_text"] == "respuesta"
@@ -87,3 +87,12 @@ def test_set_feedback_does_not_clobber_the_rest_of_the_record(tmp_path):
 
 def test_references_defaults_to_empty_list(tmp_path):
     assert save_query(new_query_id(), "pregunta", _fake_result(), queries_dir=tmp_path)["references"] == []
+
+
+def test_save_query_preserves_observed_elapsed_time(tmp_path):
+    result = _fake_result()
+    result["elapsed_ms"] = 1234
+
+    record = save_query(new_query_id(), "pregunta", result, queries_dir=tmp_path)
+
+    assert record["elapsed_ms"] == 1234

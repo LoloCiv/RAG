@@ -6,6 +6,7 @@ no se fabrican turnos previos que les den autoridad de instrucciones.
 
 import logging
 import threading
+import time
 from pathlib import Path
 
 from app.agent import claude_agent
@@ -62,31 +63,42 @@ def _citations_for(references: list[str] | None, queries_dir: Path) -> list[dict
     return citations
 
 
-def ask(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR) -> dict:
+def ask(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR, response_mode: str = "deep") -> dict:
     """Ejecuta un solo turno y guarda solo resultados completos."""
     prompt = build_prompt(question, _citations_for(references, queries_dir))
+    started_at = time.perf_counter()
     if not _TURN_LOCK.acquire(timeout=_LOCK_TIMEOUT_S):
         raise RuntimeError("El buzón está procesando otra consulta. Reintentá en unos segundos.")
     try:
-        result = claude_agent.run_turn([{"role": "user", "content": prompt}])
+        if response_mode == "deep":
+            result = claude_agent.run_turn([{"role": "user", "content": prompt}])
+        else:
+            result = claude_agent.run_turn([{"role": "user", "content": prompt}], response_mode=response_mode)
     finally:
         _TURN_LOCK.release()
+    result = {**result, "elapsed_ms": round((time.perf_counter() - started_at) * 1000)}
     return save_query(new_query_id(), question, result, references, queries_dir)
 
 
-def ask_streaming(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR):
+def ask_streaming(question: str, references: list[str] | None = None, queries_dir: Path = QUERIES_DIR, response_mode: str = "deep"):
     """Reenvia eventos parciales y cambia el evento final al contrato del buzon."""
     prompt = build_prompt(question, _citations_for(references, queries_dir))
+    started_at = time.perf_counter()
     if not _TURN_LOCK.acquire(timeout=_LOCK_TIMEOUT_S):
         raise RuntimeError("El buzón está procesando otra consulta. Reintentá en unos segundos.")
     try:
         result = None
-        for event in claude_agent.run_turn_streaming([{"role": "user", "content": prompt}]):
+        if response_mode == "deep":
+            runner = claude_agent.run_turn_streaming([{"role": "user", "content": prompt}])
+        else:
+            runner = claude_agent.run_turn_streaming([{"role": "user", "content": prompt}], response_mode=response_mode)
+        for event in runner:
             if event["type"] == "final":
                 result = event["result"]
             else:
                 yield event
     finally:
         _TURN_LOCK.release()
+    result = {**result, "elapsed_ms": round((time.perf_counter() - started_at) * 1000)}
     record = save_query(new_query_id(), question, result, references, queries_dir)
     yield {"type": "final", "record": record}

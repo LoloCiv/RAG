@@ -52,6 +52,9 @@ def save_query(query_id: str, question: str, result: dict, references: list[str]
         "chart_paths": result.get("chart_paths", []),
         "feedback": None,
         "raw_messages": _to_json_safe(result.get("new_messages", [])),
+        # Conservamos la espera observada por la persona para comparar los
+        # modos rápido/profundo y detectar regresiones del agente.
+        "elapsed_ms": result.get("elapsed_ms"),
     }
     queries_dir.mkdir(parents=True, exist_ok=True)
     _path_for(query_id, queries_dir).write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")

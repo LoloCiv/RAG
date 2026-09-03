@@ -77,3 +77,17 @@ def test_ask_streaming_last_event_carries_the_saved_record(tmp_path, monkeypatch
     last = list(inbox.ask_streaming("pregunta", queries_dir=tmp_path))[-1]
     assert last["type"] == "final"
     assert load_query(last["record"]["id"], tmp_path)["answer_text"] == "ok"
+
+
+def test_ask_streaming_passes_fast_mode_to_agent(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake(history, response_mode):
+        captured["response_mode"] = response_mode
+        yield {"type": "final", "result": _result("ok")}
+
+    monkeypatch.setattr(inbox.claude_agent, "run_turn_streaming", fake)
+
+    list(inbox.ask_streaming("pregunta", queries_dir=tmp_path, response_mode="fast"))
+
+    assert captured["response_mode"] == "fast"

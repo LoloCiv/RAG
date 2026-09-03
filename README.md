@@ -20,8 +20,12 @@ gráficos y una bandeja revisable para comunicaciones con proveedores.
 - **Streaming** de la respuesta (`run_turn_streaming`) con indicación de
   progreso durante tool calls largos, y fuentes citadas como nombre de
   archivo + link a Drive (no el `source_id` crudo)
-- **Buzón de consultas** persistente (`data/queries/`), con citas opcionales
-  de consultas anteriores y feedback por respuesta
+- **Buzón de consultas** persistente (`data/queries/`), que propone usar la
+  respuesta más reciente como contexto, permite sumar otras citas y conserva
+  feedback y tiempo de respuesta
+- **Modo Rápida / Profunda**: Rápida limita el presupuesto del agente para
+  preguntas cotidianas; Profunda conserva la investigación completa para
+  comparaciones amplias, tablas y gráficos
 - **Bandeja de operaciones comerciales** (`data/work_items/`): conserva
   mensaje entrante, evidencia, borrador, revisión de fuentes, aprobación,
   entrega y auditoría

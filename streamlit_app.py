@@ -16,7 +16,25 @@ from app.operations.service import generate_draft
 
 setup_logging()
 logger = logging.getLogger(__name__)
-st.set_page_config(page_title="Agente de Eventos (POC)", page_icon="📋", layout="wide")
+st.set_page_config(page_title="Centro de Conocimiento", page_icon="✦", layout="wide")
+st.markdown(
+    """
+    <style>
+      .block-container { max-width: 1160px; padding-top: 2.5rem; padding-bottom: 4rem; }
+      [data-testid="stSidebar"] { border-right: 1px solid rgba(148, 163, 184, .16); }
+      [data-testid="stSidebar"] .stButton > button { text-align: left; border: 0; background: transparent; }
+      [data-testid="stSidebar"] .stButton > button:hover { background: rgba(56, 189, 248, .10); }
+      div[data-testid="stForm"], div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 16px; border-color: rgba(148, 163, 184, .22);
+      }
+      div[data-testid="stForm"] { padding: 1.25rem 1.35rem .8rem; background: rgba(15, 23, 42, .42); }
+      .app-kicker { color: #38bdf8; font-weight: 700; font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; }
+      .app-subtitle { color: #94a3b8; font-size: 1.05rem; margin-bottom: 1.7rem; }
+      .answer-meta { color: #94a3b8; font-size: .85rem; margin-bottom: .75rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -103,8 +121,12 @@ with st.sidebar:
         with st.expander("Ver detalle"):
             st.dataframe([{"archivo": item["file_name"], "tipo": item["mime_type"].split(".")[-1], "ultima ingesta": item["last_ingested_at"]} for item in _manifest.values()], hide_index=True, use_container_width=True)
 
-st.title("📋 Agente de Eventos (POC)")
-st.caption("Bandeja de operaciones y consultas con evidencia sobre eventos, presupuestos y proveedores.")
+st.markdown('<div class="app-kicker">Centro de conocimiento</div>', unsafe_allow_html=True)
+st.title("Eventos, proveedores y presupuestos")
+st.markdown(
+    '<div class="app-subtitle">Consultas con evidencia verificable y una bandeja de operaciones con revisión humana.</div>',
+    unsafe_allow_html=True,
+)
 
 
 def _render_sources(sources: list[dict]) -> None:
@@ -123,18 +145,22 @@ _FEEDBACK_VALUE_TO_INDEX = {"down": 0, "up": 1}
 
 def _render_query(record: dict, include_text: bool = True) -> None:
     """Centraliza el render para consultas nuevas y recuperadas del sidebar."""
-    if include_text:
-        st.write(record["answer_text"])
-    if record.get("sources"):
-        _render_sources(record["sources"])
-    for chart_path in record.get("chart_paths", []):
-        st.image(chart_path)
-    current_index = _FEEDBACK_VALUE_TO_INDEX.get(record.get("feedback"))
-    new_index = st.feedback("thumbs", key=f"fb_{record['id']}", default=current_index)
-    new_feedback = _FEEDBACK_INDEX_TO_VALUE.get(new_index)
-    if new_feedback != record.get("feedback"):
-        queries.set_feedback(record["id"], new_feedback)
-        record["feedback"] = new_feedback
+    with st.container(border=True):
+        elapsed_ms = record.get("elapsed_ms")
+        if elapsed_ms is not None:
+            st.markdown(f'<div class="answer-meta">Respuesta generada en {elapsed_ms / 1000:.1f} s</div>', unsafe_allow_html=True)
+        if include_text:
+            st.write(record["answer_text"])
+        if record.get("sources"):
+            _render_sources(record["sources"])
+        for chart_path in record.get("chart_paths", []):
+            st.image(chart_path)
+        current_index = _FEEDBACK_VALUE_TO_INDEX.get(record.get("feedback"))
+        new_index = st.feedback("thumbs", key=f"fb_{record['id']}", default=current_index)
+        new_feedback = _FEEDBACK_INDEX_TO_VALUE.get(new_index)
+        if new_feedback != record.get("feedback"):
+            queries.set_feedback(record["id"], new_feedback)
+            record["feedback"] = new_feedback
 
 
 def _render_work_item(record: dict) -> None:
@@ -209,20 +235,47 @@ if st.session_state.viewing_work_item_id:
         st.divider()
 
 
+_recent = queries.list_queries()
+_latest_query = _recent[0] if _recent else None
+_other_queries = _recent[1:] if _recent else []
+
 with st.form("query_form", clear_on_submit=True):
-    _recent = queries.list_queries()
-    _titles = {query["id"]: query["title"] for query in _recent}
-    references = st.multiselect(
-        "Citar consultas anteriores (opcional)",
-        options=list(_titles),
-        format_func=lambda query_id: _titles[query_id],
+    st.subheader("Nueva consulta")
+    st.caption("La respuesta incluirá las fuentes que usó para que puedas verificarla.")
+    continuing_latest = False
+    if _latest_query:
+        continuing_latest = st.checkbox(
+            f"Continuar con el contexto de: {_latest_query['title'] or 'última consulta'}",
+            value=True,
+            key=f"continue_{_latest_query['id']}",
+        )
+    else:
+        st.caption("Después de tu primera respuesta, podrás usarla como contexto en la siguiente consulta.")
+
+    _other_titles = {query["id"]: query["title"] or "(sin título)" for query in _other_queries}
+    additional_references: list[str] = []
+    if _other_titles:
+        additional_references = st.multiselect(
+            "Agregar otras respuestas como contexto",
+            options=list(_other_titles),
+            format_func=lambda query_id: _other_titles[query_id],
+        )
+
+    response_mode_label = st.radio(
+        "Modo de respuesta",
+        options=["Rápida", "Profunda"],
+        horizontal=True,
+        help="Rápida limita la exploración a lo necesario; Profunda conserva el presupuesto completo para análisis amplios o gráficos.",
     )
     question = st.text_area(
-        "Tu consulta",
-        height=120,
-        placeholder="Preguntá sobre eventos, presupuestos y proveedores…",
+        "¿Qué querés saber?",
+        height=110,
+        placeholder="Ej.: ¿Qué cambió respecto del evento más costoso?",
     )
-    submitted = st.form_submit_button("Enviar consulta", type="primary")
+    submitted = st.form_submit_button("Consultar", type="primary", use_container_width=True)
+
+references = ([_latest_query["id"]] if _latest_query and continuing_latest else []) + additional_references
+response_mode = "fast" if response_mode_label == "Rápida" else "deep"
 
 if submitted and question.strip():
     with st.chat_message("user"):
@@ -234,7 +287,7 @@ if submitted and question.strip():
 
         def _stream_answer_text():
             saved_record = None
-            for event in inbox.ask_streaming(question, references=references or None):
+            for event in inbox.ask_streaming(question, references=references or None, response_mode=response_mode):
                 if event["type"] == "text_delta":
                     progress.empty()
                     yield event["text"]
@@ -247,8 +300,11 @@ if submitted and question.strip():
         try:
             st.write_stream(_stream_answer_text())
             progress.empty()
-            _render_query(final_record, include_text=False)
             st.session_state.viewing_id = final_record["id"]
+            # El registro ya esta persistido: rehacer la vista hace que la
+            # próxima pregunta muestre la respuesta recién creada como
+            # contexto disponible, sin esperar otra interacción.
+            st.rerun()
         except Exception as error:
             progress.empty()
             logger.exception("Fallo la consulta")

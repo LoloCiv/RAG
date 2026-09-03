@@ -10,10 +10,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # --- Paths del proyecto ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Claude Desktop inicia el servidor MCP con un cwd arbitrario; anclar el
+# archivo evita que las credenciales dependan de desde donde se lanzo.
+load_dotenv(PROJECT_ROOT / ".env")
 DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
 DATA_DIR = PROJECT_ROOT / "data"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
@@ -21,10 +22,11 @@ CHART_OUTPUTS_DIR = DATA_DIR / "chart_outputs"
 # Fase 5 (persistencia de conversaciones): un JSON por conversacion, mismo
 # patron que manifest.json -- ver app/agent/conversations.py.
 CONVERSATIONS_DIR = DATA_DIR / "conversations"
+QUERIES_DIR = DATA_DIR / "queries"
 GOOGLE_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 GOOGLE_TOKEN_PATH = PROJECT_ROOT / "token.json"
 
-for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, CONVERSATIONS_DIR):
+for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, CONVERSATIONS_DIR, QUERIES_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 # --- API keys / conexiones ---

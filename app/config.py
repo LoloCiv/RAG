@@ -114,17 +114,19 @@ RERANK_MODEL = os.getenv("RERANK_MODEL", "rerank-2.5-lite")
 RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "20"))
 
 
-def require_env() -> list[str]:
-    """Devuelve la lista de variables de entorno obligatorias que faltan.
-
-    Util para que el arranque de la app (Streamlit) falle con un mensaje
-    claro en vez de un traceback crudo mas adelante.
-    """
+def require_query_env() -> list[str]:
+    """Exige solo lo necesario para responder sobre una base ya ingerida."""
     missing = []
     if not ANTHROPIC_API_KEY:
         missing.append("ANTHROPIC_API_KEY")
     if not VOYAGE_API_KEY:
         missing.append("VOYAGE_API_KEY")
+    return missing
+
+
+def require_env() -> list[str]:
+    """Conserva los requisitos de la app completa, incluida la ingesta."""
+    missing = require_query_env()
     if not GOOGLE_DRIVE_FOLDER_ID:
         missing.append("GOOGLE_DRIVE_FOLDER_ID")
     if not NEO4J_PASSWORD:

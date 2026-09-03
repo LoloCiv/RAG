@@ -75,6 +75,9 @@ CITATION_MAX_CHARS = int(os.getenv("CITATION_MAX_CHARS", "2000"))
 
 # --- Modelos ---
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+# La extraccion estructurada no usa programmatic tool calling; Haiku reduce
+# el costo sin quitar capacidades que este camino necesite.
+EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-haiku-4-5-20251001")
 # voyage-4-lite (no voyage-large-2): los modelos "voyage-4*" tienen 200M
 # tokens gratis por mes -- voyage-large-2 es un modelo legacy que Voyage
 # excluyo explicitamente de esa franquicia gratuita, asi que para un POC

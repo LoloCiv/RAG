@@ -4,14 +4,13 @@
 convertir en implementation plan con pasos TDD (`superpowers:writing-plans`)
 y ejecutar.
 
-**Plan de alto nivel ya aprobado por el usuario:**
-`C:\Users\Laure\.claude\plans\igual-creo-que-ademas-woolly-thunder.md`
-(cópialo también acá abajo en "Contexto" para que este doc sea
-autocontenido).
+**Plan de alto nivel ya aprobado por el usuario** (plan mode de la
+sesión de brainstorming; su contenido esencial está reproducido abajo en
+"Contexto" para que este doc sea autocontenido).
 
 ## Contexto
 
-Hoy `events-rag-poc` (`C:\Users\Laure\Desktop\RAG\events-rag-poc`) es un
+Hoy `events-rag-poc` es un
 **chat conversacional** en Streamlit: acumula `api_messages` turno a turno,
 los reenvía completos a la API en cada pregunta, y los persiste en
 `data/conversations/`.
@@ -613,7 +612,7 @@ console script, para no depender del PATH):
 {
   "mcpServers": {
     "events-rag": {
-      "command": "C:\\Users\\Laure\\Desktop\\RAG\\events-rag-poc\\venv\\Scripts\\python.exe",
+      "command": "C:\\ruta\\al\\proyecto\\events-rag-poc\\venv\\Scripts\\python.exe",
       "args": ["-m", "app.mcp_server"]
     }
   }

@@ -4,6 +4,11 @@ Asistente de operaciones sobre el Google Drive de una empresa de eventos
 (historial de eventos, presupuestos, proveedores), con respuestas citadas,
 gráficos y una bandeja revisable para comunicaciones con proveedores.
 
+> **Proyecto personal / POC.** Los datos de `sample_data/` son **ficticios**:
+> los genera `sample_data/generate_samples.py` para una empresa de eventos
+> inventada ("Eventos Aurora"). Ningún dato real forma parte del repo.
+> Licencia [MIT](LICENSE).
+
 ## Que esta implementado
 
 - Estructura del proyecto, configuración (`app/config.py`)
@@ -53,24 +58,31 @@ pip install -e .
 ### 2. Qdrant (Docker)
 
 ```bash
-docker run -p 6333:6333 -v ./qdrant_storage:/qdrant/storage qdrant/qdrant
+docker run -p 127.0.0.1:6333:6333 -v ./qdrant_storage:/qdrant/storage qdrant/qdrant
 ```
 
 Dashboard en http://localhost:6333/dashboard — útil para inspeccionar los
 puntos ingeridos mientras desarrollás.
 
+Los puertos se publican solo en `127.0.0.1` a propósito: Qdrant no trae
+autenticación por defecto, y un `-p 6333:6333` pelado lo expone en todas las
+interfaces de la máquina.
+
 ### 3. Neo4j (Docker)
 
 ```bash
-docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -v ./neo4j_data:/data -e NEO4J_AUTH=neo4j/eventos-aurora-2026 neo4j:5-community
+docker run -d --name neo4j -p 127.0.0.1:7474:7474 -p 127.0.0.1:7687:7687 -v ./neo4j_data:/data -e NEO4J_AUTH=neo4j/<elegi-una-password> neo4j:5-community
 ```
 
 - **Browser** en http://localhost:7474 (usuario `neo4j`, la misma password
   del `NEO4J_AUTH`) — para inspeccionar el grafo a ojo.
 - **Bolt** en `bolt://localhost:7687` — es lo que usa el driver de Python.
-- Fijar `NEO4J_AUTH` en el `docker run` evita el flujo de "cambiá la
-  contraseña" del primer login. Tiene que coincidir con `NEO4J_PASSWORD`
-  del `.env`.
+- Reemplazá `<elegi-una-password>` por una propia (no la reutilices de otro
+  servicio). Fijar `NEO4J_AUTH` en el `docker run` evita el flujo de
+  "cambiá la contraseña" del primer login, y tiene que coincidir con
+  `NEO4J_PASSWORD` del `.env`.
+- Los puertos quedan atados a `127.0.0.1`: el grafo contiene el contenido
+  extraído de tus documentos y no debería ser alcanzable desde la red.
 - No hace falta el plugin APOC: el esquema de labels dinámicos está armado
   a propósito para no necesitarlo.
 - Tarda ~40s en aceptar conexiones la primera vez. Si el arranque de la app
@@ -169,6 +181,43 @@ Para el servidor privado, copiar `.streamlit/secrets.toml.example` a
 `AUTH_REQUIRED=true` y `ALLOWED_EMAIL_DOMAIN=empresa.com`. En desarrollo
 local la autenticación permanece explícitamente desactivada por defecto.
 
+### 9. Servidor MCP (opcional)
+
+El buzón también se expone como servidor [MCP](https://modelcontextprotocol.io)
+por stdio, para que lo consuma cualquier cliente compatible (Claude Desktop,
+Claude Code, un motor de flujos) sin acoplarse a este repo:
+
+```bash
+venv\Scripts\python.exe -m app.mcp_server      # o el script: events-rag-mcp
+```
+
+Expone **una sola tool**, `query_events_kb(question)`, stateless: cada
+llamada es una consulta independiente. Devuelve el texto de la respuesta con
+sus fuentes y los gráficos generados como imágenes embebidas (un path local
+no le sirve a un cliente remoto). Cada consulta queda además en el mismo log
+de `data/queries/` que la UI.
+
+Para un servidor de solo consulta alcanzan `ANTHROPIC_API_KEY` y
+`VOYAGE_API_KEY` (la base ya tiene que estar ingerida); si Neo4j no está, el
+agente degrada solo a búsqueda vectorial. Configuración para Claude Desktop
+(`claude_desktop_config.json`), usando el Python del venv por ruta absoluta:
+
+```json
+{
+  "mcpServers": {
+    "events-rag": {
+      "command": "C:\\ruta\\al\\proyecto\\events-rag-poc\\venv\\Scripts\\python.exe",
+      "args": ["-m", "app.mcp_server"]
+    }
+  }
+}
+```
+
+Limitación conocida: `app/agent/tools.py` guarda estado por turno a nivel
+módulo, así que los turnos se **serializan con un lock** (`app/agent/inbox.py`).
+Es correcto para stdio, que atiende a un cliente; antes de exponerlo por HTTP
+con varios usuarios hay que migrar ese estado a uno por request.
+
 ## Cómo funciona la capa de grafo (`app/graph/`)
 
 Por cada documento que el resync detecta nuevo o cambiado, además del camino
@@ -211,7 +260,7 @@ diferida para no gastar API en cada ingesta.
 
 ## Optimización del agente (sub-proyecto 2)
 
-Tres palancas aditivas sobre el agente de chat, medidas contra un baseline
+Tres palancas aditivas sobre el agente, medidas contra un baseline
 congelado (dos preguntas reales, agente sin ninguna palanca aplicada):
 
 1. **Prompt caching** (`app/agent/claude_agent.py`): la API es stateless y
@@ -316,9 +365,6 @@ en `docs/superpowers/specs/2026-08-31-optimizacion-agente-design.md`.
 
 ## Evaluación de retrieval y reranking (Fases 1-2)
 
-Roadmap completo de mejoras posteriores al sub-proyecto 2 en
-`C:\Users\Laure\.claude\plans\bueno-si-queres-realizamos-toasty-riddle.md`.
-
 Antes de gastar en mejorar el retrieval hacía falta poder medirlo. El arnés
 (`scripts/eval_retrieval.py`) corre un golden set fijo de 14 preguntas
 (`evals/golden_set.json`, mezcla de hechos de archivo único y multi-archivo
@@ -345,11 +391,12 @@ embeddings) trae `RERANK_CANDIDATES` candidatos de más antes de recortar a
 `top_k`, y degrada con gracia al orden vectorial original si Voyage falla
 (cuota, red) sin romper la búsqueda.
 
-## UX de la conversación (Fase 3)
+## Streaming y fuentes legibles (Fase 3)
 
 - **Streaming**: `run_turn_streaming()` (`app/agent/claude_agent.py`) es
   una función hermana de `run_turn()` (que sigue igual, sin streaming) —
-  la usa `streamlit_app.py` con `st.write_stream`.
+  `streamlit_app.py` la consume a través de `inbox.ask_streaming()` con
+  `st.write_stream`.
 - **Indicación de progreso**: mientras Claude busca / trae una tabla exacta
   / calcula, la UI muestra una etiqueta legible en vez de un spinner mudo
   de "Pensando...".
@@ -373,18 +420,28 @@ embeddings) trae `RERANK_CANDIDATES` candidatos de más antes de recortar a
   ingiriendo igual, pero queda marcado en `ResyncResult.warnings` y visible
   en el sidebar tras el resync — antes pasaba inadvertido.
 
-## Conversaciones persistentes y feedback (Fase 5)
+## Buzón persistente y feedback (Fase 5)
 
-Cada conversación se guarda como un JSON en `data/conversations/`
-(`app/agent/conversations.py`, mismo patrón que el manifest de ingesta) y
-se autoguarda después de cada turno completo. El sidebar lista las
-conversaciones pasadas (ordenadas por última actividad) con un botón para
-retomar cualquiera o arrancar una nueva.
+Esta fase nació como "conversaciones persistentes" y se reemplazó por un
+**buzón de consultas**: el historial multi-turno obligaba a reconstruir
+exactamente los bloques de cada ronda de tool calls (dos bugs reales de
+historial corrupto salieron de ahí, ver
+`docs/superpowers/plans/2026-09-02-fix-multiturn-history-y-charts.md`) y
+reenviaba todo en cada pregunta. Diseño completo en
+`docs/superpowers/specs/2026-09-03-buzon-de-consultas-mcp-design.md`.
 
-Cada respuesta del asistente tiene un widget de 👍/👎 (`st.feedback`) que
-se guarda junto con la conversación — captura nomás, sin promoción
-automática al golden set de la Fase 1 todavía (queda a criterio de quien
-lo revise más adelante).
+Cada consulta se guarda como un JSON independiente en `data/queries/`
+(`app/agent/queries.py`): pregunta, respuesta, fuentes, gráficos, citas,
+feedback y tiempo de respuesta. Es un log append-only y cada consulta es
+*single-shot*: el historial **nunca se reenvía** a la API (los bloques crudos
+del runner se guardan solo como auditoría). La continuidad es explícita:
+se puede citar una o más consultas anteriores y `app/agent/inbox.py` las
+inyecta como referencia delimitada y acotada (`CITATION_MAX_CHARS`), no como
+turnos fabricados que cobren autoridad de instrucción.
+
+Cada respuesta tiene un widget de 👍/👎 (`st.feedback`) que se guarda en el
+registro de la consulta — captura nomás, sin promoción automática al golden
+set de la Fase 1 todavía (queda a criterio de quien lo revise más adelante).
 
 La ingesta automática por webhook de Drive (en vez del botón manual de
 resync) quedó explícitamente fuera de esta fase: necesita un endpoint
@@ -396,17 +453,24 @@ HTTPS público alcanzable desde internet, que este POC local no tiene hoy.
 venv\Scripts\python.exe -m pytest -q
 ```
 
-197 tests (al 2026-09-03). Cubren la lógica pura que no necesita
-credenciales ni servicios corriendo: dispatch de mimeType, forma del
-payload, esquema de `source_id` (incluido el link a Drive), parseo de PDF,
-reranking y dedup de resultados (con degradación con gracia si Voyage
-falla), acumulación de fuentes, streaming del agente (eventos
-text_delta/tool_start/final contra un SDK fake), persistencia de
-conversaciones, detección de PDFs sin texto extraíble, los guards del
-system prompt, y toda la capa de grafo salvo la escritura real
-(sanitización de Cypher —incluidos intentos de inyección—, fuzzy matching y
-la orquestación de `ingest.py` contra un `graph_store` falso).
+214 tests. Corren **sin credenciales ni servicios** (no hace falta `.env`,
+Docker ni red: todo lo externo está reemplazado por fakes) y cubren la
+lógica pura: dispatch de mimeType, forma del payload, esquema de `source_id`
+(incluido el link a Drive), parseo de PDF, reranking y dedup de resultados
+(con degradación con gracia si Voyage falla), acumulación de fuentes,
+streaming del agente (eventos text_delta/tool_start/final contra un SDK
+fake), el log de consultas del buzón y las citas, el servidor MCP, la
+bandeja de operaciones y su webhook, detección de PDFs sin texto
+extraíble, los guards del system prompt, y toda la capa de grafo salvo la
+escritura real (sanitización de Cypher —incluidos intentos de inyección—,
+fuzzy matching y la orquestación de `ingest.py` contra un `graph_store`
+falso).
 
-No reemplazan los smoke tests manuales del plan (ítem "Verificación") ni el
-arnés de retrieval (`scripts/eval_retrieval.py`, ver arriba) para lo que sí
-depende de Drive/Qdrant/Neo4j/Voyage/Claude reales.
+No reemplazan las verificaciones manuales con la app real (documentadas en
+los planes de `docs/superpowers/plans/`) ni el arnés de retrieval
+(`scripts/eval_retrieval.py`, ver arriba) para lo que sí depende de
+Drive/Qdrant/Neo4j/Voyage/Claude reales.
+
+## Licencia
+
+[MIT](LICENSE).

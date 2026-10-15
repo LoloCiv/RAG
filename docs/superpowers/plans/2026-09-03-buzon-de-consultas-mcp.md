@@ -2114,7 +2114,7 @@ Agregar a la config de MCP servers (`claude_desktop_config.json` o equivalente):
 {
   "mcpServers": {
     "events-rag": {
-      "command": "C:\\Users\\Laure\\Desktop\\RAG\\events-rag-poc\\venv\\Scripts\\python.exe",
+      "command": "C:\\ruta\\al\\proyecto\\events-rag-poc\\venv\\Scripts\\python.exe",
       "args": ["-m", "app.mcp_server"]
     }
   }

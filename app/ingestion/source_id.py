@@ -1,8 +1,6 @@
 """Esquema de source_id y de IDs de punto deterministicos para Qdrant.
 
-Ver la seccion "Ingesta de Google Drive" del plan
-(C:\\Users\\Laure\\.claude\\plans\\me-gustaria-hacer-la-mutable-pixel.md) para
-el razonamiento completo. Resumen:
+Resumen del esquema:
 
 - source_id de un PDF o Google Doc: "gdrive:{drive_file_id}"
 - source_id de un tab de una Sheet/Excel: "gdrive:{drive_file_id}:{tab_name}"

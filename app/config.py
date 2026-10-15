@@ -10,21 +10,22 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # --- Paths del proyecto ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Claude Desktop inicia el servidor MCP con un cwd arbitrario; anclar el
+# archivo evita que las credenciales dependan de desde donde se lanzo.
+load_dotenv(PROJECT_ROOT / ".env")
 DOWNLOADS_DIR = PROJECT_ROOT / "downloads"
 DATA_DIR = PROJECT_ROOT / "data"
 MANIFEST_PATH = DATA_DIR / "manifest.json"
 CHART_OUTPUTS_DIR = DATA_DIR / "chart_outputs"
-# Fase 5 (persistencia de conversaciones): un JSON por conversacion, mismo
-# patron que manifest.json -- ver app/agent/conversations.py.
-CONVERSATIONS_DIR = DATA_DIR / "conversations"
+QUERIES_DIR = DATA_DIR / "queries"
+WORK_ITEMS_DIR = DATA_DIR / "work_items"
+COLLABORATION_DB_PATH = DATA_DIR / "collaboration.sqlite3"
 GOOGLE_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 GOOGLE_TOKEN_PATH = PROJECT_ROOT / "token.json"
 
-for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, CONVERSATIONS_DIR):
+for _dir in (DOWNLOADS_DIR, DATA_DIR, CHART_OUTPUTS_DIR, QUERIES_DIR, WORK_ITEMS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 # --- API keys / conexiones ---
@@ -33,6 +34,14 @@ VOYAGE_API_KEY = os.getenv("VOYAGE_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "events_kb")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")
+# La memoria de correo es read-only en el piloto. Mantener este corte a nivel
+# servidor evita que una configuracion accidental de n8n habilite envios.
+ENABLE_OUTBOUND = os.getenv("ENABLE_OUTBOUND", "false").casefold() == "true"
+# Solo para desarrollo local antes de configurar la identidad Google Workspace.
+DEVELOPMENT_ACTOR_EMAIL = os.getenv("DEVELOPMENT_ACTOR_EMAIL", "operaciones@local")
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "false").casefold() == "true"
+ALLOWED_EMAIL_DOMAIN = os.getenv("ALLOWED_EMAIL_DOMAIN", "")
 
 # --- Grafo de conocimiento (Neo4j) ---
 # Bolt es el protocolo binario que usa el driver Python; el browser de Neo4j
@@ -70,8 +79,18 @@ GRAPH_MAX_EDGES = int(os.getenv("GRAPH_MAX_EDGES", "40"))
 # a proposito, no vale la pena una llamada de tokenizer por busqueda.
 GRAPH_MAX_CHARS = int(os.getenv("GRAPH_MAX_CHARS", "1600"))
 
+# Citar varias respuestas completas puede inflar el prompt miles de tokens;
+# este techo usa la misma regla deliberada de ~4 caracteres por token.
+CITATION_MAX_CHARS = int(os.getenv("CITATION_MAX_CHARS", "2000"))
+
 # --- Modelos ---
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+# La extraccion estructurada no usa programmatic tool calling; Haiku reduce
+# el costo sin quitar capacidades que este camino necesite.
+EXTRACTION_MODEL = os.getenv("EXTRACTION_MODEL", "claude-haiku-4-5-20251001")
+# Clasificar y redactar mensajes no necesita el loop de herramientas del
+# agente; separar este modelo evita pagar razonamiento complejo por rutina.
+OPERATIONS_MODEL = os.getenv("OPERATIONS_MODEL", "claude-haiku-4-5-20251001")
 # voyage-4-lite (no voyage-large-2): los modelos "voyage-4*" tienen 200M
 # tokens gratis por mes -- voyage-large-2 es un modelo legacy que Voyage
 # excluyo explicitamente de esa franquicia gratuita, asi que para un POC
@@ -111,19 +130,26 @@ RERANK_MODEL = os.getenv("RERANK_MODEL", "rerank-2.5-lite")
 RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "20"))
 
 
-def require_env() -> list[str]:
-    """Devuelve la lista de variables de entorno obligatorias que faltan.
-
-    Util para que el arranque de la app (Streamlit) falle con un mensaje
-    claro en vez de un traceback crudo mas adelante.
-    """
+def require_query_env() -> list[str]:
+    """Exige solo lo necesario para responder sobre una base ya ingerida."""
     missing = []
     if not ANTHROPIC_API_KEY:
         missing.append("ANTHROPIC_API_KEY")
     if not VOYAGE_API_KEY:
         missing.append("VOYAGE_API_KEY")
+    return missing
+
+
+def require_env() -> list[str]:
+    """Conserva los requisitos de la app completa, incluida la ingesta."""
+    missing = require_query_env()
     if not GOOGLE_DRIVE_FOLDER_ID:
         missing.append("GOOGLE_DRIVE_FOLDER_ID")
     if not NEO4J_PASSWORD:
         missing.append("NEO4J_PASSWORD")
     return missing
+
+
+def require_webhook_env() -> list[str]:
+    """El webhook solo admite eventos autenticados porque abre datos comerciales."""
+    return ["N8N_WEBHOOK_TOKEN"] if not N8N_WEBHOOK_TOKEN else []

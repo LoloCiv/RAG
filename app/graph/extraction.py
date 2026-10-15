@@ -17,7 +17,7 @@ import logging
 import anthropic
 from pydantic import BaseModel, Field
 
-from app.config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+from app.config import ANTHROPIC_API_KEY, EXTRACTION_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def extract_from_document(document_text: str, file_name: str) -> ExtractionResul
     """
     client = _get_client()
     response = client.messages.parse(
-        model=CLAUDE_MODEL,
+        model=EXTRACTION_MODEL,
         max_tokens=_MAX_TOKENS,
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Documento: {file_name}\n\n{document_text}"}],

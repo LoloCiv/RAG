@@ -103,19 +103,36 @@ Respondes preguntas usando el historial propio de eventos, presupuestos y provee
 - Si no encontras nada relevante, decilo claramente en vez de inventar."""
 
 
-def _tool_runner_kwargs(message_history: list[dict]) -> dict:
+_FAST_MODE_PROMPT = """
+
+MODO RÁPIDO: respondé con precisión y citas, pero evitá exploración extra.
+Empezá con una búsqueda bien formulada, reutilizá el mapa que trae esa
+búsqueda y hacé una segunda búsqueda solo si falta evidencia. Para números
+exactos usá la tabla fuente necesaria, sin pedir tablas que no aporten al
+resultado. Si el pedido requiere una investigación comparativa amplia,
+explicá qué parte falta en vez de prolongar el turno a ciegas.
+"""
+
+
+def _tool_runner_kwargs(message_history: list[dict], response_mode: str = "deep") -> dict:
     """Kwargs compartidos del tool_runner entre run_turn() y el arnes de
     benchmark (scripts/benchmark_agent.py). Un solo lugar que los define:
     ya divergieron una vez durante la implementacion de este sub-proyecto
     (el except de Neo4j se amplio aca y no en el arnes) porque estaban
     duplicados a mano en los dos archivos.
     """
+    if response_mode not in {"fast", "deep"}:
+        raise ValueError("response_mode debe ser fast o deep")
+    fast = response_mode == "fast"
     return {
         "model": CLAUDE_MODEL,
-        "max_tokens": 16000,
+        # 4k alcanza para la consulta cotidiana y acota el razonamiento
+        # adaptativo. El modo profundo conserva el presupuesto original para
+        # comparaciones, planificación y gráficos complejos.
+        "max_tokens": 4096 if fast else 16000,
         "thinking": {"type": "adaptive"},
         "cache_control": {"type": "ephemeral"},
-        "system": SYSTEM_PROMPT,
+        "system": SYSTEM_PROMPT + (_FAST_MODE_PROMPT if fast else ""),
         "tools": [search_knowledge_base, get_source_table, CODE_EXECUTION_TOOL],
         "messages": message_history,
     }
@@ -236,7 +253,7 @@ def _build_result(client: anthropic.Anthropic, last_message, new_messages: list[
     }
 
 
-def run_turn(message_history: list[dict]) -> dict:
+def run_turn(message_history: list[dict], response_mode: str = "deep") -> dict:
     """Ejecutar un turno del agente con Claude (no incremental -- ver
     run_turn_streaming() para la version con streaming/progreso, Fase 3).
 
@@ -263,7 +280,7 @@ def run_turn(message_history: list[dict]) -> dict:
         # contenido repetido de vueltas anteriores. Este parametro activa
         # caching automatico, que coloca el breakpoint en el ultimo bloque
         # cacheable y lo va corriendo a medida que crece la conversacion.
-        runner = client.beta.messages.tool_runner(**_tool_runner_kwargs(message_history))
+        runner = client.beta.messages.tool_runner(**_tool_runner_kwargs(message_history, response_mode))
 
         last_message = None
         for message in runner:
@@ -293,7 +310,7 @@ def _tool_progress_label(tool_name: str) -> str:
     return _TOOL_PROGRESS_LABELS.get(tool_name, f"Usando {tool_name}...")
 
 
-def run_turn_streaming(message_history: list[dict]):
+def run_turn_streaming(message_history: list[dict], response_mode: str = "deep"):
     """Version con streaming de run_turn() (Fase 3) -- funcion HERMANA, no
     reemplazo: mismos servicios/tools/runner por debajo (via _init_turn()/
     _build_result()), pero devuelve un generador de eventos incrementales
@@ -316,7 +333,7 @@ def run_turn_streaming(message_history: list[dict]):
     original_len = len(message_history)
 
     try:
-        runner = client.beta.messages.tool_runner(stream=True, **_tool_runner_kwargs(message_history))
+        runner = client.beta.messages.tool_runner(stream=True, **_tool_runner_kwargs(message_history, response_mode))
 
         last_message = None
         for stream in runner:

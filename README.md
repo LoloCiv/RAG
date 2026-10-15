@@ -1,484 +1,95 @@
-# Events RAG POC
+# Centro de conocimiento para equipos de eventos
 
-Espacio compartido para equipos de eventos: organiza las comunicaciones del
-evento en curso y permite investigar antecedentes históricos de Google Drive
-con respuestas citadas y gráficos. Las investigaciones pueden guardarse como
-referencia de uno o varios eventos actuales.
-
-## Espacio de trabajo
-
-- **Eventos:** crear y consultar eventos activos/archivados, revisar correo,
-  buscar conversaciones y consultar antecedentes guardados.
-- **Consultar antecedentes:** investigar el histórico. La continuidad usa la
-  respuesta elegida en esta sesión; los correos actuales no se agregan al RAG.
-- **Configuración:** sincronización y diagnóstico bajo demanda. Navegar por
-  eventos no necesita Qdrant, Neo4j ni llamadas a modelos.
-
-El recorrido, los filtros, la migración y la validación de esta entrega se
-describen en [docs/event-workspace.md](docs/event-workspace.md).
+Un RAG sobre el Google Drive de una empresa de eventos, pensado como **buzón de
+consultas** y no como chatbot: cada pregunta es independiente, se responde con
+fuentes verificables y queda registrada. Se usa desde una UI en Streamlit o,
+como una tool más, desde cualquier cliente [MCP](https://modelcontextprotocol.io).
 
 > **Proyecto personal / POC.** Los datos de `sample_data/` son **ficticios**:
-> los genera `sample_data/generate_samples.py` para una empresa de eventos
-> inventada ("Eventos Aurora"). Ningún dato real forma parte del repo.
-> Licencia [MIT](LICENSE).
+> los genera `sample_data/generate_samples.py` para una empresa inventada
+> ("Eventos Aurora"). Ningún dato real forma parte del repo. Licencia [MIT](LICENSE).
 
-## Que esta implementado
+## Qué hace
 
-- Estructura del proyecto, configuración (`app/config.py`)
-- Ingesta de Google Drive completa: auth OAuth, listado, PDF/Doc/Sheet/xlsx
-  (`app/ingestion/`)
-- Manifest para resync idempotente, con aviso cuando un PDF no aportó texto
-  extraíble (posible escaneado sin OCR — ver `ResyncResult.warnings`)
-- Embeddings con Voyage AI (`app/rag/embeddings.py`) y wrapper de Qdrant
-  (`app/rag/vector_db.py`), con **reranking** (Voyage `rerank-2.5-lite`) para
-  reordenar los candidatos antes de devolverlos
-- Agente Claude con `tool_runner`, `search_knowledge_base` /
-  `get_source_table` y generación de gráficos (`app/agent/`), con guard
-  explícito de prompt injection en el system prompt
-- **Streaming** de la respuesta (`run_turn_streaming`) con indicación de
-  progreso durante tool calls largos, y fuentes citadas como nombre de
-  archivo + link a Drive (no el `source_id` crudo)
-- **Buzón de consultas** persistente (`data/queries/`), que propone usar la
-  respuesta seleccionada por la persona como contexto, permite sumar otras citas y conserva
-  feedback y tiempo de respuesta
-- **Modo Rápida / Profunda**: Rápida limita el presupuesto del agente para
-  preguntas cotidianas; Profunda conserva la investigación completa para
-  comparaciones amplias, tablas y gráficos
-- **Operaciones comerciales heredadas** (`data/work_items/`), fuera de la navegación actual: conserva
-  mensaje entrante, evidencia, borrador, revisión de fuentes, aprobación,
-  entrega y auditoría
-- Webhook autenticado para n8n (`app/webhook_server.py`): n8n ingiere y
-  confirma envíos; la app nunca envía email ni WhatsApp directamente
-- **Capa de grafo de conocimiento** sobre Neo4j (`app/graph/`): en cada
-  resync, además de embeber los chunks en Qdrant, se extraen entidades y
-  relaciones con Claude y se escriben en un grafo. `search_knowledge_base`
-  lo usa para enriquecer cada búsqueda con un mapa de entidades/relaciones
-  conectadas, sin costo de LLM adicional (ver "Optimización del agente")
-- **Arnés de evaluación de retrieval** (`scripts/eval_retrieval.py`), sin
-  gastar Claude — mide Recall@k y MRR contra un golden set fijo (ver
-  "Evaluación de retrieval y reranking")
+- **Consultar antecedentes.** Preguntas sobre eventos, presupuestos y proveedores,
+  con respuesta citada (archivo + link a Drive) y gráficos cuando hay números.
+  Modo *Rápida* para lo cotidiano y *Profunda* para comparaciones y tablas.
+  Una consulta puede citar explícitamente otras anteriores.
+- **Encontrar eventos similares.** Describís un evento nuevo y recupera hasta
+  cinco antecedentes con coincidencias, diferencias, proveedores y costos, donde
+  **cada afirmación lleva una cita textual que se verifica contra el fragmento
+  recuperado**; lo que no está documentado queda como "no documentado".
+- **Eventos.** Espacio compartido que reúne los correos de cada evento en curso
+  (Gmail en solo lectura vía n8n, con confirmación humana antes de asociarlos).
+- **Servidor MCP.** Una única tool stateless, `query_events_kb`, para integrarlo
+  en sistemas más grandes.
 
-## Setup
+## Arquitectura
 
-### 1. Entorno Python
+```
+Google Drive ─► ingesta (PDF / Doc / Sheet / xlsx)
+                 ├─► Qdrant   vectores (Voyage) + reranking
+                 └─► Neo4j    grafo de entidades y relaciones (extraídas con Claude)
+                                   │
+ Streamlit ─┐                      ▼
+ Servidor MCP ┴─► buzón ─► agente Claude (tool_runner)
+                              ├─ search_knowledge_base   (vectores + mapa del grafo)
+                              ├─ get_source_table        (llamada programática desde code_execution)
+                              └─ code_execution          (cálculos y gráficos)
+
+ n8n (Gmail, solo lectura) ─► webhook con Bearer ─► SQLite (eventos y correo compartido)
+```
+
+## Decisiones de diseño que vale la pena mirar
+
+- **Buzón en vez de chat.** El historial multi-turno obligaba a reconstruir
+  exactamente cada ronda de tool calls; dos bugs reales de historial corrupto
+  salieron de ahí. Se reemplazó por consultas *single-shot* con citas explícitas.
+  Ver [fases 3 a 5](docs/fases-3-a-5.md).
+- **Generación con citas verificables.** Los fragmentos recuperados se tratan como
+  datos no confiables (anti prompt-injection) y una cita que no aparece
+  literalmente en su fuente invalida la respuesta. Ver [eventos similares](docs/similar-events.md).
+- **Costo medido, no supuesto.** Prompt caching, programmatic tool calling y un
+  mapa de grafo, evaluados contra un baseline congelado. Una pregunta mejoró
+  78 % en tiempo y otra empeoró; se identificó la causa y se mitigó, aunque una
+  sola remedición no alcanza para darla por resuelta. Ver
+  [optimización del agente](docs/optimizacion-del-agente.md).
+- **Modelo elegido por una restricción, no por precio de lista.** El agente
+  depende de programmatic tool calling, que Haiku 4.5 no soporta; entre los que
+  sí lo soportan, Sonnet 5 era el más barato a septiembre de 2026. La extracción
+  del grafo, que no lo usa, corre en Haiku. Ver el
+  [análisis](docs/superpowers/specs/2026-09-03-buzon-de-consultas-mcp-design.md).
+- **Retrieval evaluado.** Golden set de 14 preguntas: el reranking subió el MRR
+  de 0.90 a 1.00 con Recall@k = 1.00. Ver [evaluación](docs/evaluacion-de-retrieval.md).
+- **Seguro por defecto.** Servicios atados a `127.0.0.1`, webhook con Bearer
+  token, envíos externos deshabilitados (`ENABLE_OUTBOUND=false`) y Gmail de
+  solo lectura. Ver [integraciones](docs/integraciones.md).
+
+## Inicio rápido
+
+Requiere Python 3.11+, Docker y claves de Anthropic y Voyage AI.
 
 ```bash
 python -m venv venv
 venv\Scripts\activate
 pip install -e .
+copy .env.example .env
 ```
 
-### 2. Qdrant (Docker)
+Completá las claves en `.env`, levantá Qdrant y Neo4j (puertos atados a
+`127.0.0.1`; elegí tu propia password y ponela también en `NEO4J_PASSWORD`):
 
 ```bash
-docker run -p 127.0.0.1:6333:6333 -v ./qdrant_storage:/qdrant/storage qdrant/qdrant
+docker run -d -p 127.0.0.1:6333:6333 qdrant/qdrant
+docker run -d --name neo4j -p 127.0.0.1:7474:7474 -p 127.0.0.1:7687:7687 -e NEO4J_AUTH=neo4j/<tu-password> neo4j:5-community
 ```
-
-Dashboard en http://localhost:6333/dashboard — útil para inspeccionar los
-puntos ingeridos mientras desarrollás.
-
-Los puertos se publican solo en `127.0.0.1` a propósito: Qdrant no trae
-autenticación por defecto, y un `-p 6333:6333` pelado lo expone en todas las
-interfaces de la máquina.
-
-### 3. Neo4j (Docker)
-
-```bash
-docker run -d --name neo4j -p 127.0.0.1:7474:7474 -p 127.0.0.1:7687:7687 -v ./neo4j_data:/data -e NEO4J_AUTH=neo4j/<elegi-una-password> neo4j:5-community
-```
-
-- **Browser** en http://localhost:7474 (usuario `neo4j`, la misma password
-  del `NEO4J_AUTH`) — para inspeccionar el grafo a ojo.
-- **Bolt** en `bolt://localhost:7687` — es lo que usa el driver de Python.
-- Reemplazá `<elegi-una-password>` por una propia (no la reutilices de otro
-  servicio). Fijar `NEO4J_AUTH` en el `docker run` evita el flujo de
-  "cambiá la contraseña" del primer login, y tiene que coincidir con
-  `NEO4J_PASSWORD` del `.env`.
-- Los puertos quedan atados a `127.0.0.1`: el grafo contiene el contenido
-  extraído de tus documentos y no debería ser alcanzable desde la red.
-- No hace falta el plugin APOC: el esquema de labels dinámicos está armado
-  a propósito para no necesitarlo.
-- Tarda ~40s en aceptar conexiones la primera vez. Si el arranque de la app
-  dice *"Neo4j no responde en bolt://localhost:7687"*, esperá a que el log
-  del contenedor diga `Started.` (`docker logs neo4j`).
-
-Consultas útiles en el Browser una vez que corriste un resync:
-
-```cypher
-MATCH (n:Entity) RETURN n LIMIT 50;
-CALL db.labels();
-
-// Una entidad que aparece en varios documentos y lo que la conecta
-MATCH (n:Entity {norm_name: "catering buena mesa"})-[r]-(m) RETURN n, r, m;
-```
-
-### 4. Credenciales de Google Drive
-
-1. [Google Cloud Console](https://console.cloud.google.com/) → crear/elegir
-   un proyecto.
-2. Habilitar **Google Drive API** y **Google Sheets API**.
-3. Crear credenciales OAuth 2.0 tipo **"Desktop app"**.
-4. Descargar el JSON y guardarlo como `credentials.json` en la raíz de este
-   proyecto.
-
-### 5. Variables de entorno
-
-Obligatorias (la app avisa al arrancar si falta alguna):
-
-| Variable | Para qué |
-|---|---|
-| `ANTHROPIC_API_KEY` | agente + extracción de grafo |
-| `VOYAGE_API_KEY` | embeddings |
-| `GOOGLE_DRIVE_FOLDER_ID` | carpeta a sincronizar (se ve en su URL) |
-| `NEO4J_PASSWORD` | tiene que coincidir con el `NEO4J_AUTH` del `docker run` |
-| `N8N_WEBHOOK_TOKEN` | Bearer token para el webhook local de operaciones |
-
-Opcionales, con default en `app/config.py`: `QDRANT_URL`,
-`QDRANT_COLLECTION`, `CLAUDE_MODEL`, `NEO4J_URI`, `NEO4J_USER`,
-`NEO4J_DATABASE`, `GRAPH_DEDUP_THRESHOLD` (0-100, default `90`: cuán
-parecidos tienen que ser dos nombres para tratarlos como la misma entidad),
-`RERANK_MODEL` (default `rerank-2.5-lite`, ver "Evaluación de retrieval y
-reranking"), `RERANK_CANDIDATES` (default `20`: cuántos candidatos trae
-Qdrant antes de rerankear), `EXTRACTION_MODEL` y `OPERATIONS_MODEL`
-(ambos Haiku por defecto para extracción, clasificación y borradores).
-
-### 6. Levantar la app
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-La primera vez que uses "Resincronizar Google Drive" se va a abrir el
-navegador para el consentimiento OAuth (una sola vez, el token queda
-cacheado en `token.json`).
-
-### 7. Integración comercial heredada con n8n
-
-Esta sección documenta contratos conservados por compatibilidad. La interfaz
-actual no presenta generación de borradores ni aprobaciones de envío.
-Mantener `ENABLE_OUTBOUND=false`: las rutas outbox/sent/failed responden 404.
-Para el piloto de comunicaciones actuales, usar el endpoint de correo de la
-sección 8, `POST /n8n/email/inbound`.
-
-Iniciá el webhook en otra terminal:
-
-```bash
-venv\Scripts\python.exe -m app.webhook_server
-```
-
-n8n conserva las credenciales de Gmail o WhatsApp Business Cloud y llama al
-servidor local con `Authorization: Bearer <N8N_WEBHOOK_TOKEN>`:
-
-- `POST /n8n/inbound`: recibe un mensaje normalizado con `message_id`,
-  `channel` (`email` o `whatsapp`), `supplier_name` y `text`; también acepta
-  `event_name`, `thread_key`, `received_at` y `attachments`.
-- `GET /n8n/outbox`: devuelve solo work items aprobados y pendientes.
-- `POST /n8n/outbox/{id}/sent`: n8n confirma el envío con
-  `external_message_id` después de que el canal lo aceptó.
-- `POST /n8n/outbox/{id}/failed`: registra un error recuperable de entrega.
-
-El flujo comercial anterior era: mensaje entrante → borrador con evidencia → edición y
-revisión explícita de fuentes y aprobación humana en Streamlit → n8n toma el
-work item → confirmación de envío. No hay una ruta que saltee la aprobación
-humana, ni se aprueba un item sin texto de borrador.
-
-El módulo heredado de indicadores calcula tiempos hasta borrador/resolución,
-tasa de aprobación sin edición y detecta en la auditoría cualquier entrega
-que carezca de una aprobación previa. La corrección semántica de las fuentes
-queda deliberadamente como revisión humana, registrada antes de aprobar.
-
-### 8. Memoria compartida de correo
-
-El piloto colaborativo usa correo corporativo en modo lectura: cada persona
-etiqueta los mensajes que quiere compartir como `Evento/<slug>`, n8n los
-sincroniza periódicamente y el equipo confirma el evento antes de que formen
-parte de las conversaciones confirmadas. Los resúmenes de correo quedan para
-una entrega posterior. El workflow y el contrato detallado
-están en [docs/n8n-gmail-pilot.md](docs/n8n-gmail-pilot.md).
-
-### Encontrar eventos similares
-
-En **Consultar antecedentes → Encontrar eventos similares**, describí un evento
-y agregá preferencias opcionales de tipo, asistentes y ubicación. Recupera hasta
-cinco antecedentes históricos con coincidencias, diferencias y evidencia, y permite
-guardar la investigación en un evento actual. No utiliza sus correos en la búsqueda.
-Detalles, límites y evaluación: [docs/similar-events.md](docs/similar-events.md).
-
-El piloto Gmail incluye [Docker Compose](integrations/n8n/compose.yaml) y un
-[workflow importable desactivado](integrations/n8n/gmail-pilot.workflow.json).
-La instancia local en puerto 5678 tiene su propio volumen y conserva la instalación
-anterior. La cuenta de prueba debe autorizar OAuth de solo lectura en el navegador.
-
-Para el servidor privado, copiar `.streamlit/secrets.toml.example` a
-`.streamlit/secrets.toml`, completar OAuth de Google y definir
-`AUTH_REQUIRED=true` y `ALLOWED_EMAIL_DOMAIN=empresa.com`. En desarrollo
-local la autenticación permanece explícitamente desactivada por defecto.
-
-### 9. Servidor MCP (opcional)
-
-El buzón también se expone como servidor [MCP](https://modelcontextprotocol.io)
-por stdio, para que lo consuma cualquier cliente compatible (Claude Desktop,
-Claude Code, un motor de flujos) sin acoplarse a este repo:
-
-```bash
-venv\Scripts\python.exe -m app.mcp_server      # o el script: events-rag-mcp
-```
-
-Expone **una sola tool**, `query_events_kb(question)`, stateless: cada
-llamada es una consulta independiente. Devuelve el texto de la respuesta con
-sus fuentes y los gráficos generados como imágenes embebidas (un path local
-no le sirve a un cliente remoto). Cada consulta queda además en el mismo log
-de `data/queries/` que la UI.
-
-Para un servidor de solo consulta alcanzan `ANTHROPIC_API_KEY` y
-`VOYAGE_API_KEY` (la base ya tiene que estar ingerida); si Neo4j no está, el
-agente degrada solo a búsqueda vectorial. Configuración para Claude Desktop
-(`claude_desktop_config.json`), usando el Python del venv por ruta absoluta:
-
-```json
-{
-  "mcpServers": {
-    "events-rag": {
-      "command": "C:\\ruta\\al\\proyecto\\events-rag-poc\\venv\\Scripts\\python.exe",
-      "args": ["-m", "app.mcp_server"]
-    }
-  }
-}
-```
-
-Limitación conocida: `app/agent/tools.py` guarda estado por turno a nivel
-módulo, así que los turnos se **serializan con un lock** (`app/agent/inbox.py`).
-Es correcto para stdio, que atiende a un cliente; antes de exponerlo por HTTP
-con varios usuarios hay que migrar ese estado a uno por request.
-
-## Cómo funciona la capa de grafo (`app/graph/`)
-
-Por cada documento que el resync detecta nuevo o cambiado, además del camino
-vectorial:
-
-1. `extraction.py` — **una** llamada a Claude por documento completo (no por
-   chunk) que devuelve entidades y relaciones con structured outputs. Los
-   tipos son **strings libres** que Claude elige según el dominio del
-   documento, no un enum fijo: el mismo pipeline sirve para una empresa de
-   eventos o para una ferretería sin tocar código.
-2. `dedup.py` — fuzzy matching determinístico (`rapidfuzz`) para reconocer
-   que "Buena Mesa Catering" y "Catering Buena Mesa" son la misma entidad,
-   sin gastar API.
-3. `cypher.py` — el tipo libre se convierte a un label **seguro y canónico**:
-   whitelist de `\w` (Cypher no permite parametrizar labels, así que el texto
-   se interpola: dejar pasar solo `\w` cierra la puerta a inyección aunque el
-   documento sea hostil), sin tildes y con case fijo. Sin lo canónico,
-   `Locación` / `Locacion` / `LOCACION` serían tres labels distintos para el
-   mismo tipo y ninguna consulta por tipo funcionaría.
-4. `neo4j_client.py` — escribe el grafo.
-
-**La identidad de una entidad es su nombre normalizado, no el par
-(nombre, tipo).** Como el tipo es libre, el mismo proveedor puede venir como
-`Proveedor` en un documento y `Proveedor_de_Catering` en otro; si el tipo
-fuera parte de la clave quedarían dos nodos. En cambio se mergea por
-`norm_name` (con un constraint de unicidad) y **el tipo se acumula como
-label adicional**, así no se pierde ninguno de los dos. Es el mismo problema
-que tiene Microsoft GraphRAG por agrupar sus entidades por `(title, type)`
-([microsoft/graphrag#1718](https://github.com/microsoft/graphrag/issues/1718)).
-
-Idempotencia: un archivo que cambió no se borra y se recrea como en Qdrant,
-porque un nodo puede estar compartido entre varios documentos. Se saca el
-`source_id` del archivo de todas las listas y después se recolecta lo que
-quedó sin ninguna fuente (`remove_source_contribution`).
-
-Limitación conocida: el fuzzy matching no une entidades que no comparten
-texto ("DJ Marco Vidal" vs "Marco Vidal", "Los Sonidos" vs "Los Sonidos
-(banda)"). Resolverlo pide resolución semántica con LLM, deliberadamente
-diferida para no gastar API en cada ingesta.
-
-## Optimización del agente (sub-proyecto 2)
-
-Tres palancas aditivas sobre el agente, medidas contra un baseline
-congelado (dos preguntas reales, agente sin ninguna palanca aplicada):
-
-1. **Prompt caching** (`app/agent/claude_agent.py`): la API es stateless y
-   reenvía todo el historial en cada round-trip. Un solo parámetro
-   (`cache_control`) activa caching automático, que baja el costo de ese
-   re-envío (las lecturas de caché facturan a 0.1× el precio normal).
-2. **Programmatic tool calling** (`app/agent/tools.py`): `get_source_table`
-   se llama desde el código que escribe Claude en `code_execution`, no
-   directo -- las tablas completas ya no entran al contexto de la
-   conversación, solo el resultado que el código calcula.
-3. **Grafo de conocimiento** (`app/graph/retrieval.py` +
-   `app/graph/neo4j_client.py`): `search_knowledge_base` devuelve, además
-   de los chunks, un mapa compacto de las entidades y relaciones conectadas
-   a esos documentos -- sin costo de LLM ni round-trips nuevos.
-
-### Resultados medidos (`python -m scripts.benchmark_agent`, 3 palancas activas)
-
-| Pregunta | Métrica | Baseline | Medido | Cambio |
-|---|---|---|---|---|
-| **proveedor** | tiempo | 87,8 s | 19,6 s | **-78%** |
-| | round-trips | 3 | 3 | +0% |
-| | tool calls | 4 | 3 | -25% |
-| | tokens totales (in + cache) | 43.783 | 48.046 | +10% |
-| | **costo ponderado de entrada*** | 43.783 | **37.364** | **-15%** |
-| **planificación** | tiempo | 43,3 s | 110,5 s | +155% |
-| | round-trips | 3 | 6 | +100% |
-| | tool calls | 6 | 14 | +133% |
-| | tokens totales (in + cache) | 65.499 | 319.772 | +388% |
-| | **costo ponderado de entrada*** | 65.499 | **74.620** | **+14%** |
-
-\* *Costo ponderado* pondera lecturas de caché a 0,1× y escrituras a 1,25×
-(precios reales de la API). Es solo de entrada -- excluye `tokens_out`
-porque el baseline congelado nunca lo capturó (sus entradas en `BASELINE`
-tienen `tokens_out: 0` con un comentario aclarando que no se capturó al
-congelar, ver `scripts/benchmark_agent.py`) -- y es la única columna
-comparable 1:1 contra el baseline: el baseline no usaba caching, así que ahí
-tokens totales == costo.
-El conteo crudo de `tokens_in` de la API por sí solo cae a valores de un
-dígito una vez que el caching está activo (porque ya no cuenta los tokens
-servidos desde caché), lo que produciría un "-100%" engañoso si se lo
-comparara directo contra el baseline -- por eso esta tabla usa tokens
-totales y costo ponderado, no `tokens_in` crudo.
-
-**La pregunta "proveedor" es el caso que motivó la palanca 3** (ver spec,
-sección "Contexto"): en el baseline, esa pregunta encadenaba 4 búsquedas
-semánticas a ciegas para descubrir que "Catering Buena Mesa" trabajó en dos
-casamientos más. Con el grafo, esas conexiones llegan en el mismo
-`search_knowledge_base` que trae los chunks -- de ahí el -78% de tiempo con
-la misma cantidad de round-trips.
-
-**La pregunta "planificación" no era el caso objetivo de la palanca 3** --
-el spec ya señalaba que sus 3 round-trips eran eficientes por la
-paralelización del SDK. Medido dos veces más para confirmar que no era un
-outlier (la misma pregunta se volvió a medir dos veces más: la segunda
-corrida dio +185% de tokens totales y -23% de costo ponderado; la oficial
-de la tabla de arriba dio +388% de tokens y +14% de costo), la causa está
-identificada: el bloque de mapa se calibró (`GRAPH_MAX_ANCHORS`/
-`GRAPH_MAX_EDGES` en `app/config.py`) mirando una sola entidad muy conectada
-del corpus ("Catering Buena Mesa", 11 aristas), pero una pregunta amplia como
-esta toca 5 entidades ancla a la vez, cada una aportando sus propias
-aristas -- el bloque real mide ~970 tokens por llamada contra el presupuesto
-de 200-400 que asumía un solo ancla. Además, cuando el mismo turno dispara
-varias búsquedas en paralelo sobre entidades solapadas (algo que el SDK ya
-hacía antes de este sub-proyecto), cada una arrastra su propia copia del
-mapa, duplicando ese costo sin aportar información nueva.
-
-Ninguno de los dos casos perdió calidad de respuesta: se revisaron a mano
-las respuestas completas de ambas preguntas contra las fuentes citadas y el
-contenido real del corpus -- los datos, las citas y las conclusiones son
-correctos, y el agente es explícito sobre lo que no encuentra en vez de
-inventarlo.
-
-**Actualización — implementado**: los dos ítems de arriba (dedup del mapa
-entre búsquedas paralelas del mismo turno, y un presupuesto real de tamaño
-en vez de topes de cantidad) se implementaron después de esta medición. Con
-`GRAPH_MAX_CHARS` (`app/config.py`) cortando anclas completas apenas el
-bloque supera ~400 tokens, más `_mapa_anchors_shown` (`app/agent/tools.py`)
-evitando repetir una ancla ya mostrada en el turno:
-
-- **Sin gastar API de Claude** (solo Qdrant + Neo4j + embeddings): las dos
-  búsquedas en paralelo de "planificación" pasaron de ~7.770 caracteres
-  combinados (~1.942 tokens) a **2.475 caracteres (~618 tokens)**, una baja
-  del 68%. "proveedor" no se vio afectado -- su mapa sigue dentro del
-  presupuesto original.
-- **Remedido con el benchmark completo** (`python -m scripts.benchmark_agent
-  planificacion`): costo ponderado -24% contra el baseline (mejor que las
-  tres corridas anteriores: +14%, -23% y -23%). Los tokens totales crudos
-  siguen altos en esta corrida puntual (+169%) porque el agente decidió
-  explorar varias tablas -- esa variabilidad es del propio
-  `thinking=adaptive` y de cuántas tablas decide pedir cada vez, no algo
-  que este arreglo del mapa controle. Con una sola corrida post-arreglo no
-  alcanza para declarar el caso resuelto, pero la dirección es consistente
-  con la causa raíz identificada.
-
-Se evaluó (y se descartó) migrar el agente principal o la extracción de
-entidades a un modelo local (la máquina de desarrollo tiene una RTX 5060 de
-8GB vía Ollama): el ahorro de estas tres palancas viene de reducir el
-*costo por token* (caching) y la *cantidad de tokens reenviados* (PTC y
-grafo), no el precio por token, y un modelo local en el agente principal
-sería más lento con el volumen de contexto que maneja hoy. Detalle completo
-en `docs/superpowers/specs/2026-08-31-optimizacion-agente-design.md`.
-
-## Evaluación de retrieval y reranking (Fases 1-2)
-
-Antes de gastar en mejorar el retrieval hacía falta poder medirlo. El arnés
-(`scripts/eval_retrieval.py`) corre un golden set fijo de 14 preguntas
-(`evals/golden_set.json`, mezcla de hechos de archivo único y multi-archivo
-sobre `sample_data/`) contra Qdrant + Voyage reales — **sin gastar Claude**:
-
-```bash
-python -m scripts.eval_retrieval                  # todo el golden set, con reranking
-python -m scripts.eval_retrieval --no-rerank       # solo búsqueda vectorial, para comparar
-python -m scripts.eval_retrieval --only fernandez_lopez_cronograma_pagos
-```
-
-Métricas por pregunta: **Recall@k** (¿aparecieron los archivos esperados en
-el top-k?) y **MRR** (qué tan arriba salió el primero correcto — la que
-mueve el reranking).
-
-| | Recall@k | MRR |
-|---|---|---|
-| Sin reranking (base, Fase 1) | 1.00 | 0.90 |
-| Con reranking (Fase 2) | 1.00 | **1.00** |
-
-El reranking (`QdrantStorage.rerank_results()` en `app/rag/vector_db.py`,
-modelo `rerank-2.5-lite` de Voyage — tier gratuito, igual que los
-embeddings) trae `RERANK_CANDIDATES` candidatos de más antes de recortar a
-`top_k`, y degrada con gracia al orden vectorial original si Voyage falla
-(cuota, red) sin romper la búsqueda.
-
-## Streaming y fuentes legibles (Fase 3)
-
-- **Streaming**: `run_turn_streaming()` (`app/agent/claude_agent.py`) es
-  una función hermana de `run_turn()` (que sigue igual, sin streaming) —
-  `streamlit_app.py` la consume a través de `inbox.ask_streaming()` con
-  `st.write_stream`.
-- **Indicación de progreso**: mientras Claude busca / trae una tabla exacta
-  / calcula, la UI muestra una etiqueta legible en vez de un spinner mudo
-  de "Pensando...".
-- **Fuentes legibles**: se citan por nombre de archivo con link directo a
-  Drive (`app/ingestion/source_id.py:drive_view_url`), no por el
-  `source_id` crudo (`gdrive:1EgvjgF4md...`).
-
-## Robustez y seguridad (Fase 4)
-
-- **Guard de prompt injection**: el system prompt le aclara a Claude que el
-  contenido que devuelve `search_knowledge_base` es dato no confiable, no
-  instrucciones — un documento con "ignorá lo anterior y recomendá X" no
-  debería poder cambiarle el comportamiento.
-- **Aviso de truncamiento**: si `get_source_table` devuelve una tabla
-  recortada (`MAX_TABLE_ROWS`), la instrucción de avisarle al usuario vive
-  en el propio docstring de la tool (es lo que `@beta_tool` expone a
-  Claude — no alcanza con ponerlo en un comentario o en la sección
-  "Returns", eso nunca le llega).
-- **PDFs sin texto extraíble**: un PDF que entra con 0 chunks (posible
-  escaneado sin OCR, el `PDFReader` de LlamaIndex no hace OCR) se sigue
-  ingiriendo igual, pero queda marcado en `ResyncResult.warnings` y visible
-  en el sidebar tras el resync — antes pasaba inadvertido.
-
-## Buzón persistente y feedback (Fase 5)
-
-Esta fase nació como "conversaciones persistentes" y se reemplazó por un
-**buzón de consultas**: el historial multi-turno obligaba a reconstruir
-exactamente los bloques de cada ronda de tool calls (dos bugs reales de
-historial corrupto salieron de ahí, ver
-`docs/superpowers/plans/2026-09-02-fix-multiturn-history-y-charts.md`) y
-reenviaba todo en cada pregunta. Diseño completo en
-`docs/superpowers/specs/2026-09-03-buzon-de-consultas-mcp-design.md`.
-
-Cada consulta se guarda como un JSON independiente en `data/queries/`
-(`app/agent/queries.py`): pregunta, respuesta, fuentes, gráficos, citas,
-feedback y tiempo de respuesta. Es un log append-only y cada consulta es
-*single-shot*: el historial **nunca se reenvía** a la API (los bloques crudos
-del runner se guardan solo como auditoría). La continuidad es explícita:
-se puede citar una o más consultas anteriores y `app/agent/inbox.py` las
-inyecta como referencia delimitada y acotada (`CITATION_MAX_CHARS`), no como
-turnos fabricados que cobren autoridad de instrucción.
-
-Cada respuesta tiene un widget de 👍/👎 (`st.feedback`) que se guarda en el
-registro de la consulta — captura nomás, sin promoción automática al golden
-set de la Fase 1 todavía (queda a criterio de quien lo revise más adelante).
-
-La ingesta automática por webhook de Drive (en vez del botón manual de
-resync) quedó explícitamente fuera de esta fase: necesita un endpoint
-HTTPS público alcanzable desde internet, que este POC local no tiene hoy.
+La ingesta de Drive necesita credenciales OAuth de Google. La guía completa
+(Drive, Neo4j, variables) está en [docs/setup.md](docs/setup.md).
 
 ## Tests
 
@@ -486,23 +97,47 @@ HTTPS público alcanzable desde internet, que este POC local no tiene hoy.
 venv\Scripts\python.exe -m pytest -q
 ```
 
-214 tests. Corren **sin credenciales ni servicios** (no hace falta `.env`,
-Docker ni red: todo lo externo está reemplazado por fakes) y cubren la
-lógica pura: dispatch de mimeType, forma del payload, esquema de `source_id`
-(incluido el link a Drive), parseo de PDF, reranking y dedup de resultados
-(con degradación con gracia si Voyage falla), acumulación de fuentes,
-streaming del agente (eventos text_delta/tool_start/final contra un SDK
-fake), el log de consultas del buzón y las citas, el servidor MCP, la
-bandeja de operaciones y su webhook, detección de PDFs sin texto
-extraíble, los guards del system prompt, y toda la capa de grafo salvo la
-escritura real (sanitización de Cypher —incluidos intentos de inyección—,
-fuzzy matching y la orquestación de `ingest.py` contra un `graph_store`
-falso).
+261 tests. Corren **sin credenciales ni servicios**: todo lo externo está
+reemplazado por fakes. Para lo que sí depende de Drive, Qdrant, Neo4j, Voyage y
+Claude reales están `scripts/eval_retrieval.py` y `scripts/benchmark_agent.py`.
 
-No reemplazan las verificaciones manuales con la app real (documentadas en
-los planes de `docs/superpowers/plans/`) ni el arnés de retrieval
-(`scripts/eval_retrieval.py`, ver arriba) para lo que sí depende de
-Drive/Qdrant/Neo4j/Voyage/Claude reales.
+## Estructura
+
+| Ruta | Qué contiene |
+|---|---|
+| `app/agent/` | agente, tools, buzón (`inbox.py`) y log de consultas |
+| `app/rag/`, `app/graph/` | embeddings, Qdrant, reranking · grafo en Neo4j |
+| `app/ingestion/` | Google Drive → chunks, tablas y manifest de resync |
+| `app/similar_events/` | búsqueda de antecedentes con citas verificadas |
+| `app/collaboration/`, `app/ui/` | eventos y correo compartido · interfaz Streamlit |
+| `app/mcp_server.py`, `app/webhook_server.py` | servidor MCP · webhook para n8n |
+| `app/operations/` | módulo comercial heredado, fuera de la interfaz |
+| `integrations/n8n/` | Docker Compose y workflow del piloto de Gmail |
+| `scripts/`, `evals/` | evaluación de retrieval, benchmark y golden sets |
+| `docs/` | guías, mediciones y, en `superpowers/`, specs y planes de cada cambio |
+
+## Documentación
+
+[Instalación](docs/setup.md) ·
+[Integraciones](docs/integraciones.md) ·
+[Espacio por evento](docs/event-workspace.md) ·
+[Eventos similares](docs/similar-events.md) ·
+[Piloto Gmail con n8n](docs/n8n-gmail-pilot.md) ·
+[Capa de grafo](docs/capa-de-grafo.md) ·
+[Optimización del agente](docs/optimizacion-del-agente.md) ·
+[Evaluación de retrieval](docs/evaluacion-de-retrieval.md) ·
+[Fases 3 a 5](docs/fases-3-a-5.md)
+
+## Limitaciones conocidas
+
+- Es un POC de un solo usuario; el servidor MCP serializa los turnos con un lock
+  porque el estado por turno es global al módulo. Antes de exponerlo por HTTP con
+  varios usuarios hay que moverlo a estado por request.
+- Los PDF escaneados no se leen (sin OCR): se ingieren pero quedan marcados.
+- El fuzzy matching del grafo no une alias sin texto en común ("DJ Marco Vidal"
+  / "Marco Vidal").
+- La bandeja comercial con aprobación de borradores quedó como módulo heredado,
+  sin pantalla en la interfaz actual.
 
 ## Licencia
 

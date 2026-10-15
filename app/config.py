@@ -35,6 +35,7 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "events_kb")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 N8N_WEBHOOK_TOKEN = os.getenv("N8N_WEBHOOK_TOKEN")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "127.0.0.1")
 # La memoria de correo es read-only en el piloto. Mantener este corte a nivel
 # servidor evita que una configuracion accidental de n8n habilite envios.
 ENABLE_OUTBOUND = os.getenv("ENABLE_OUTBOUND", "false").casefold() == "true"

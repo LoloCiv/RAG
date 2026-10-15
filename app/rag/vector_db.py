@@ -139,7 +139,7 @@ class QdrantStorage:
         return self._points_to_results(response.points)
 
     @staticmethod
-    def _points_to_results(points) -> list[dict]:
+    def _points_to_results(points, include_metadata: bool = False) -> list[dict]:
         """Arma una lista correlacionada (text/source_id/file_name/score) a
         partir de los puntos que devuelve Qdrant, YA ordenados por score
         (mas relevante primero). Sin dedupear -- el reranking necesita el
@@ -163,10 +163,18 @@ class QdrantStorage:
                         "source_id": payload.get("source_id", ""),
                         "file_name": payload.get("file_name", ""),
                         "score": getattr(r, "score", 0.0),
+                        **({"chunk_index": payload.get("chunk_index"), "sheet_tab": payload.get("sheet_tab")} if include_metadata else {}),
                     }
                 )
 
         return results
+
+    def search_evidence(self, query_vector: list[float], top_k: int = 20) -> list[dict]:
+        """Conserva localizadores solo para la ruta nueva, sin cambiar las tools existentes."""
+        response = self.client.query_points(collection_name=self.collection, query=query_vector,
+            query_filter=Filter(must=[FieldCondition(key="kind", match=MatchValue(value="text_chunk"))]),
+            with_payload=True, limit=top_k)
+        return self._points_to_results(response.points, include_metadata=True)
 
     @staticmethod
     def dedup_source_ids(results: list[dict]) -> list[str]:

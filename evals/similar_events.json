@@ -1,0 +1,6 @@
+[
+  {"id":"cena_corporativa", "description":"Cena corporativa con presentaciones y catering", "attendees":150, "expected_events":["RH Summit 2026"], "expected_files":["Brief_RH_Summit_2026.pdf"], "notes":"El brief es evidencia de planificación, no de realización; si el estado no se confirma, indicarlo o excluirlo."},
+  {"id":"boda", "description":"Casamiento con cena y fiesta", "expected_events":["Perez-Gomez"], "expected_files":["Resumen_Evento_Casamiento_Perez_Gomez.pdf","Contrato_Notas_Perez_Gomez"], "notes":"Reunir retrospectiva y condiciones sin mezclar con Fernandez-Lopez."},
+  {"id":"cumpleanos", "description":"Cumpleaños de 50 con música y catering", "expected_events":["Roberto Sanchez"], "expected_files":["Reporte_Post_Evento_Roberto_Sanchez","Calendario_Eventos.xlsx"], "notes":"Distinguir cantidades realizadas de estimaciones."},
+  {"id":"sin_antecedentes", "description":"Expedición científica submarina de tres meses", "expected_events":[], "expected_files":[], "notes":"No fabricar eventos ni presentar coincidencias temáticas débiles como suficientes."}
+]

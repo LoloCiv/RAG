@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app.collaboration.store import EventStore
-from app.config import COLLABORATION_DB_PATH, ENABLE_OUTBOUND, N8N_WEBHOOK_TOKEN, WORK_ITEMS_DIR, require_webhook_env
+from app.config import COLLABORATION_DB_PATH, ENABLE_OUTBOUND, N8N_WEBHOOK_TOKEN, WEBHOOK_HOST, WORK_ITEMS_DIR, require_webhook_env
 from app.operations import work_items
 
 
@@ -90,7 +90,7 @@ def main() -> None:
     if missing:
         print("Faltan variables de entorno: " + ", ".join(missing), file=sys.stderr)
         raise SystemExit(1)
-    uvicorn.run(app, host="127.0.0.1", port=8787)
+    uvicorn.run(app, host=WEBHOOK_HOST, port=8787)
 
 
 if __name__ == "__main__":

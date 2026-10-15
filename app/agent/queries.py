@@ -56,6 +56,9 @@ def save_query(query_id: str, question: str, result: dict, references: list[str]
         # modos rápido/profundo y detectar regresiones del agente.
         "elapsed_ms": result.get("elapsed_ms"),
     }
+    # La extensión es opcional: conserva el contrato de todos los registros previos.
+    if "similar_events" in result:
+        record.update({key: _to_json_safe(result.get(key)) for key in ("similar_events", "usage", "model")})
     queries_dir.mkdir(parents=True, exist_ok=True)
     _path_for(query_id, queries_dir).write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
     return record

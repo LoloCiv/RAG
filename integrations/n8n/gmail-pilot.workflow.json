@@ -1,0 +1,451 @@
+{
+  "id": "ragGmailPilot",
+  "name": "RAG · Gmail piloto de solo lectura",
+  "active": false,
+  "nodes": [
+    {
+      "id": "ejecutar-manualmente",
+      "name": "Ejecutar manualmente",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "cada-cinco-minutos",
+      "name": "Cada cinco minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        180
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "configurar-etiqueta",
+      "name": "Configurar etiqueta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Motor puro compartido por los nodos Code y las pruebas, sin credenciales.\nfunction initialState(label = 'Evento/piloto-gmail') {\n  return { label, stage: 'profile', retry: 0, account: '', labels: {}, ids: [],\n    pageToken: '', nextPageToken: '', seenPages: [], processed: 0, pages: 0 };\n}\n\nfunction requestUrl(state) {\n  const root = 'https://gmail.googleapis.com/gmail/v1/users/me';\n  switch (state.stage) {\n    case 'profile': return root + '/profile';\n    case 'labels': return root + '/labels';\n    case 'list': return root + '/messages?maxResults=100&includeSpamTrash=true&labelIds=' +\n      encodeURIComponent(state.labelId) + (state.pageToken ? '&pageToken=' + encodeURIComponent(state.pageToken) : '');\n    case 'message': return root + '/messages/' + encodeURIComponent(state.ids[0]) + '?format=full';\n    case 'inbound': return 'http://host.docker.internal:8787/n8n/email/inbound';\n    default: throw new Error('Etapa inesperada: ' + state.stage);\n  }\n}\n\nfunction header(part, name) {\n  return (part.headers || []).filter(h => h.name.toLowerCase() === name.toLowerCase()).map(h => h.value).join(', ');\n}\n\nfunction decodeText(data, charset = 'utf-8') {\n  const bytes = Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');\n  const normalized = charset.toLowerCase();\n  if (['utf-8', 'utf8', 'us-ascii', 'ascii'].includes(normalized)) return bytes.toString('utf8');\n  if (['iso-8859-1', 'latin1', 'windows-1252'].includes(normalized)) {\n    // La mayoría del correo histórico occidental utiliza Latin-1 o Windows-1252.\n    const windows = '€\\u0081‚ƒ„…†‡ˆ‰Š‹Œ\\u008dŽ\\u008f\\u0090‘’“”•–—˜™š›œ\\u009džŸ';\n    return Array.from(bytes, b => normalized === 'windows-1252' && b >= 128 && b <= 159 ? windows[b - 128] : String.fromCharCode(b)).join('');\n  }\n  throw new Error('Charset no soportado: ' + charset + '. Revisar el mensaje en Gmail.');\n}\n\nfunction decodeHeader(value) {\n  return value.replace(/=\\?([^?]+)\\?([bq])\\?([^?]*)\\?=/gi, (_, charset, mode, data) => {\n    const encoded = mode.toLowerCase() === 'b' ? data : Buffer.from(data.replace(/_/g, ' ').replace(/=([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))), 'latin1').toString('base64');\n    return decodeText(encoded, charset);\n  });\n}\n\nfunction addresses(value) {\n  // Separar comas solo fuera de comillas y de la dirección entre ángulos.\n  const parts = []; let current = '', quoted = false, depth = 0, escaped = false;\n  for (const char of decodeHeader(value)) {\n    if (char === '\"' && !escaped) quoted = !quoted;\n    if (!quoted && char === '<') depth++;\n    if (!quoted && char === '>') depth--;\n    if (char === ',' && !quoted && depth === 0) { parts.push(current); current = ''; }\n    else current += char;\n    escaped = char === '\\\\' && !escaped;\n  }\n  parts.push(current);\n  return parts.map(s => s.trim()).filter(Boolean);\n}\n\nfunction htmlToText(html) {\n  const named = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ', aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', ntilde: 'ñ' };\n  return html.replace(/<(script|style)\\b[^>]*>[\\s\\S]*?<\\/\\1>/gi, '')\n    .replace(/<(br|\\/p|\\/div|\\/li|\\/tr)\\b[^>]*>/gi, '\\n').replace(/<[^>]+>/g, '')\n    .replace(/&(#x[\\da-f]+|#\\d+|\\w+);/gi, (full, entity) => {\n      if (entity[0] !== '#') return named[entity] ?? full;\n      const number = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);\n      return number <= 0x10ffff ? String.fromCodePoint(number) : full;\n    }).trim();\n}\n\nfunction normalizeMessage(message, state) {\n  if (!message.id || !message.threadId || !message.payload) throw new Error('Mensaje Gmail incompleto');\n  const attachments = [];\n  function body(part) {\n    const disposition = header(part, 'content-disposition');\n    if (part.filename || /attachment/i.test(disposition) || part.body?.attachmentId) {\n      // No pedir /attachments: conservar únicamente metadatos, incluso de adjuntos inline.\n      if (!part.filename && /^text\\//.test(part.mimeType || '') && part.body?.attachmentId) {\n        throw new Error('Cuerpo externalizado en Gmail: revisar el mensaje; no se descargan adjuntos');\n      }\n      attachments.push({filename: decodeHeader(part.filename || ''), mime_type: part.mimeType || '',\n        size: part.body?.size || 0, attachment_id: part.body?.attachmentId || null, part_id: part.partId || null});\n      return '';\n    }\n    const children = part.parts || [];\n    if (part.mimeType === 'multipart/alternative') {\n      const plain = children.find(child => child.mimeType === 'text/plain');\n      return body(plain || children.find(child => child.mimeType === 'text/html') || children[0] || {});\n    }\n    if (children.length) return children.map(body).filter(Boolean).join('\\n\\n');\n    if (!part.body?.data || !['text/plain', 'text/html'].includes(part.mimeType)) return '';\n    const charset = /charset\\s*=\\s*\"?([^;\"\\s]+)/i.exec(header(part, 'content-type'))?.[1] || 'utf-8';\n    const decoded = decodeText(part.body.data, charset);\n    return part.mimeType === 'text/html' ? htmlToText(decoded) : decoded;\n  }\n  const text = body(message.payload);\n  const received = new Date(Number(message.internalDate));\n  if (!message.internalDate || Number.isNaN(received.getTime())) throw new Error('Fecha de recepción Gmail inválida');\n  const labels = (message.labelIds || []).map(id => {\n    if (!state.labels[id]) throw new Error('Etiqueta desconocida: ' + id + '. Reejecutar para actualizar etiquetas.');\n    return state.labels[id];\n  });\n  return {\n    external_message_id: 'gmail:' + encodeURIComponent(state.account.toLowerCase()) + ':' + message.id,\n    account_email: state.account.toLowerCase(), thread_id: message.threadId,\n    sender: addresses(header(message.payload, 'from')).join(', '),\n    recipients: addresses(header(message.payload, 'to')), cc: addresses(header(message.payload, 'cc')),\n    subject: decodeHeader(header(message.payload, 'subject')), body_text: text, labels, attachments,\n    received_at: received.toISOString(),\n    thread_url: 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(state.account) + '#all/' + message.threadId,\n  };\n}\n\nfunction afterMessage(state) {\n  state.ids.shift(); delete state.payload;\n  if (state.ids.length) state.stage = 'message';\n  else if (state.nextPageToken) { state.pageToken = state.nextPageToken; state.stage = 'list'; }\n  else state.stage = 'done';\n}\n\nfunction transition(previous, response) {\n  const state = JSON.parse(JSON.stringify(previous));\n  const status = Number(response.statusCode || 0);\n  const error = JSON.stringify(response.error || '');\n  const transient = [408, 429, 500, 502, 503, 504].includes(status) ||\n    (!status && /ECONN|ETIMEDOUT|EAI_AGAIN|timeout|socket hang up|timed out/i.test(error));\n  if (transient && state.retry < 3) { state.retry++; return state; }\n  if (status < 200 || status >= 300) {\n    throw new Error('Falló ' + state.stage + ' (HTTP ' + (status || 'sin respuesta') + '). ' +\n      (transient ? 'Agotados tres reintentos.' : 'Revisar credenciales o payload en esta ejecución; no se reintenta un error permanente.'));\n  }\n  state.retry = 0;\n  const data = response.body;\n  if (!data || typeof data !== 'object') throw new Error('Respuesta JSON inválida en ' + state.stage);\n  switch (state.stage) {\n    case 'profile':\n      if (!data.emailAddress) throw new Error('Gmail no devolvió la cuenta');\n      state.account = data.emailAddress; state.stage = 'labels'; break;\n    case 'labels': {\n      state.labels = Object.fromEntries((data.labels || []).map(label => [label.id, label.name]));\n      const match = (data.labels || []).find(label => label.name === state.label);\n      if (!match) throw new Error('Crear o corregir la etiqueta Gmail: ' + state.label);\n      state.labelId = match.id; state.stage = 'list'; break;\n    }\n    case 'list':\n      state.pages++;\n      state.ids = [...new Set((data.messages || []).map(message => message.id))];\n      state.nextPageToken = data.nextPageToken || '';\n      if (state.nextPageToken && state.seenPages.includes(state.nextPageToken)) throw new Error('Gmail repitió el token de página');\n      if (state.nextPageToken) state.seenPages.push(state.nextPageToken);\n      if (state.ids.length) state.stage = 'message'; else afterMessage(state);\n      break;\n    case 'message':\n      state.payload = normalizeMessage(data, state); state.stage = 'inbound'; break;\n    case 'inbound':\n      state.processed++; afterMessage(state); break;\n    default: throw new Error('Etapa desconocida');\n  }\n  return state;\n}\n\nreturn [{json: initialState('Evento/piloto-gmail')}];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "preparar-solicitud",
+      "name": "Preparar solicitud",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Motor puro compartido por los nodos Code y las pruebas, sin credenciales.\nfunction initialState(label = 'Evento/piloto-gmail') {\n  return { label, stage: 'profile', retry: 0, account: '', labels: {}, ids: [],\n    pageToken: '', nextPageToken: '', seenPages: [], processed: 0, pages: 0 };\n}\n\nfunction requestUrl(state) {\n  const root = 'https://gmail.googleapis.com/gmail/v1/users/me';\n  switch (state.stage) {\n    case 'profile': return root + '/profile';\n    case 'labels': return root + '/labels';\n    case 'list': return root + '/messages?maxResults=100&includeSpamTrash=true&labelIds=' +\n      encodeURIComponent(state.labelId) + (state.pageToken ? '&pageToken=' + encodeURIComponent(state.pageToken) : '');\n    case 'message': return root + '/messages/' + encodeURIComponent(state.ids[0]) + '?format=full';\n    case 'inbound': return 'http://host.docker.internal:8787/n8n/email/inbound';\n    default: throw new Error('Etapa inesperada: ' + state.stage);\n  }\n}\n\nfunction header(part, name) {\n  return (part.headers || []).filter(h => h.name.toLowerCase() === name.toLowerCase()).map(h => h.value).join(', ');\n}\n\nfunction decodeText(data, charset = 'utf-8') {\n  const bytes = Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');\n  const normalized = charset.toLowerCase();\n  if (['utf-8', 'utf8', 'us-ascii', 'ascii'].includes(normalized)) return bytes.toString('utf8');\n  if (['iso-8859-1', 'latin1', 'windows-1252'].includes(normalized)) {\n    // La mayoría del correo histórico occidental utiliza Latin-1 o Windows-1252.\n    const windows = '€\\u0081‚ƒ„…†‡ˆ‰Š‹Œ\\u008dŽ\\u008f\\u0090‘’“”•–—˜™š›œ\\u009džŸ';\n    return Array.from(bytes, b => normalized === 'windows-1252' && b >= 128 && b <= 159 ? windows[b - 128] : String.fromCharCode(b)).join('');\n  }\n  throw new Error('Charset no soportado: ' + charset + '. Revisar el mensaje en Gmail.');\n}\n\nfunction decodeHeader(value) {\n  return value.replace(/=\\?([^?]+)\\?([bq])\\?([^?]*)\\?=/gi, (_, charset, mode, data) => {\n    const encoded = mode.toLowerCase() === 'b' ? data : Buffer.from(data.replace(/_/g, ' ').replace(/=([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))), 'latin1').toString('base64');\n    return decodeText(encoded, charset);\n  });\n}\n\nfunction addresses(value) {\n  // Separar comas solo fuera de comillas y de la dirección entre ángulos.\n  const parts = []; let current = '', quoted = false, depth = 0, escaped = false;\n  for (const char of decodeHeader(value)) {\n    if (char === '\"' && !escaped) quoted = !quoted;\n    if (!quoted && char === '<') depth++;\n    if (!quoted && char === '>') depth--;\n    if (char === ',' && !quoted && depth === 0) { parts.push(current); current = ''; }\n    else current += char;\n    escaped = char === '\\\\' && !escaped;\n  }\n  parts.push(current);\n  return parts.map(s => s.trim()).filter(Boolean);\n}\n\nfunction htmlToText(html) {\n  const named = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ', aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', ntilde: 'ñ' };\n  return html.replace(/<(script|style)\\b[^>]*>[\\s\\S]*?<\\/\\1>/gi, '')\n    .replace(/<(br|\\/p|\\/div|\\/li|\\/tr)\\b[^>]*>/gi, '\\n').replace(/<[^>]+>/g, '')\n    .replace(/&(#x[\\da-f]+|#\\d+|\\w+);/gi, (full, entity) => {\n      if (entity[0] !== '#') return named[entity] ?? full;\n      const number = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);\n      return number <= 0x10ffff ? String.fromCodePoint(number) : full;\n    }).trim();\n}\n\nfunction normalizeMessage(message, state) {\n  if (!message.id || !message.threadId || !message.payload) throw new Error('Mensaje Gmail incompleto');\n  const attachments = [];\n  function body(part) {\n    const disposition = header(part, 'content-disposition');\n    if (part.filename || /attachment/i.test(disposition) || part.body?.attachmentId) {\n      // No pedir /attachments: conservar únicamente metadatos, incluso de adjuntos inline.\n      if (!part.filename && /^text\\//.test(part.mimeType || '') && part.body?.attachmentId) {\n        throw new Error('Cuerpo externalizado en Gmail: revisar el mensaje; no se descargan adjuntos');\n      }\n      attachments.push({filename: decodeHeader(part.filename || ''), mime_type: part.mimeType || '',\n        size: part.body?.size || 0, attachment_id: part.body?.attachmentId || null, part_id: part.partId || null});\n      return '';\n    }\n    const children = part.parts || [];\n    if (part.mimeType === 'multipart/alternative') {\n      const plain = children.find(child => child.mimeType === 'text/plain');\n      return body(plain || children.find(child => child.mimeType === 'text/html') || children[0] || {});\n    }\n    if (children.length) return children.map(body).filter(Boolean).join('\\n\\n');\n    if (!part.body?.data || !['text/plain', 'text/html'].includes(part.mimeType)) return '';\n    const charset = /charset\\s*=\\s*\"?([^;\"\\s]+)/i.exec(header(part, 'content-type'))?.[1] || 'utf-8';\n    const decoded = decodeText(part.body.data, charset);\n    return part.mimeType === 'text/html' ? htmlToText(decoded) : decoded;\n  }\n  const text = body(message.payload);\n  const received = new Date(Number(message.internalDate));\n  if (!message.internalDate || Number.isNaN(received.getTime())) throw new Error('Fecha de recepción Gmail inválida');\n  const labels = (message.labelIds || []).map(id => {\n    if (!state.labels[id]) throw new Error('Etiqueta desconocida: ' + id + '. Reejecutar para actualizar etiquetas.');\n    return state.labels[id];\n  });\n  return {\n    external_message_id: 'gmail:' + encodeURIComponent(state.account.toLowerCase()) + ':' + message.id,\n    account_email: state.account.toLowerCase(), thread_id: message.threadId,\n    sender: addresses(header(message.payload, 'from')).join(', '),\n    recipients: addresses(header(message.payload, 'to')), cc: addresses(header(message.payload, 'cc')),\n    subject: decodeHeader(header(message.payload, 'subject')), body_text: text, labels, attachments,\n    received_at: received.toISOString(),\n    thread_url: 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(state.account) + '#all/' + message.threadId,\n  };\n}\n\nfunction afterMessage(state) {\n  state.ids.shift(); delete state.payload;\n  if (state.ids.length) state.stage = 'message';\n  else if (state.nextPageToken) { state.pageToken = state.nextPageToken; state.stage = 'list'; }\n  else state.stage = 'done';\n}\n\nfunction transition(previous, response) {\n  const state = JSON.parse(JSON.stringify(previous));\n  const status = Number(response.statusCode || 0);\n  const error = JSON.stringify(response.error || '');\n  const transient = [408, 429, 500, 502, 503, 504].includes(status) ||\n    (!status && /ECONN|ETIMEDOUT|EAI_AGAIN|timeout|socket hang up|timed out/i.test(error));\n  if (transient && state.retry < 3) { state.retry++; return state; }\n  if (status < 200 || status >= 300) {\n    throw new Error('Falló ' + state.stage + ' (HTTP ' + (status || 'sin respuesta') + '). ' +\n      (transient ? 'Agotados tres reintentos.' : 'Revisar credenciales o payload en esta ejecución; no se reintenta un error permanente.'));\n  }\n  state.retry = 0;\n  const data = response.body;\n  if (!data || typeof data !== 'object') throw new Error('Respuesta JSON inválida en ' + state.stage);\n  switch (state.stage) {\n    case 'profile':\n      if (!data.emailAddress) throw new Error('Gmail no devolvió la cuenta');\n      state.account = data.emailAddress; state.stage = 'labels'; break;\n    case 'labels': {\n      state.labels = Object.fromEntries((data.labels || []).map(label => [label.id, label.name]));\n      const match = (data.labels || []).find(label => label.name === state.label);\n      if (!match) throw new Error('Crear o corregir la etiqueta Gmail: ' + state.label);\n      state.labelId = match.id; state.stage = 'list'; break;\n    }\n    case 'list':\n      state.pages++;\n      state.ids = [...new Set((data.messages || []).map(message => message.id))];\n      state.nextPageToken = data.nextPageToken || '';\n      if (state.nextPageToken && state.seenPages.includes(state.nextPageToken)) throw new Error('Gmail repitió el token de página');\n      if (state.nextPageToken) state.seenPages.push(state.nextPageToken);\n      if (state.ids.length) state.stage = 'message'; else afterMessage(state);\n      break;\n    case 'message':\n      state.payload = normalizeMessage(data, state); state.stage = 'inbound'; break;\n    case 'inbound':\n      state.processed++; afterMessage(state); break;\n    default: throw new Error('Etapa desconocida');\n  }\n  return state;\n}\n\nconst state = $input.first().json; return [{json: {...state, request_url: requestUrl(state)}}];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "enviar-al-rag",
+      "name": "Enviar al RAG",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        710,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Enviar al RAG",
+              "leftValue": "={{ $json.stage === 'inbound' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "gmail-solo-lectura",
+      "name": "Gmail solo lectura",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        930,
+        160
+      ],
+      "parameters": {
+        "url": "={{ $json.request_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "procesar-gmail-solo-lectura",
+      "name": "Procesar Gmail solo lectura",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1170,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// Motor puro compartido por los nodos Code y las pruebas, sin credenciales.\nfunction initialState(label = 'Evento/piloto-gmail') {\n  return { label, stage: 'profile', retry: 0, account: '', labels: {}, ids: [],\n    pageToken: '', nextPageToken: '', seenPages: [], processed: 0, pages: 0 };\n}\n\nfunction requestUrl(state) {\n  const root = 'https://gmail.googleapis.com/gmail/v1/users/me';\n  switch (state.stage) {\n    case 'profile': return root + '/profile';\n    case 'labels': return root + '/labels';\n    case 'list': return root + '/messages?maxResults=100&includeSpamTrash=true&labelIds=' +\n      encodeURIComponent(state.labelId) + (state.pageToken ? '&pageToken=' + encodeURIComponent(state.pageToken) : '');\n    case 'message': return root + '/messages/' + encodeURIComponent(state.ids[0]) + '?format=full';\n    case 'inbound': return 'http://host.docker.internal:8787/n8n/email/inbound';\n    default: throw new Error('Etapa inesperada: ' + state.stage);\n  }\n}\n\nfunction header(part, name) {\n  return (part.headers || []).filter(h => h.name.toLowerCase() === name.toLowerCase()).map(h => h.value).join(', ');\n}\n\nfunction decodeText(data, charset = 'utf-8') {\n  const bytes = Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');\n  const normalized = charset.toLowerCase();\n  if (['utf-8', 'utf8', 'us-ascii', 'ascii'].includes(normalized)) return bytes.toString('utf8');\n  if (['iso-8859-1', 'latin1', 'windows-1252'].includes(normalized)) {\n    // La mayoría del correo histórico occidental utiliza Latin-1 o Windows-1252.\n    const windows = '€\\u0081‚ƒ„…†‡ˆ‰Š‹Œ\\u008dŽ\\u008f\\u0090‘’“”•–—˜™š›œ\\u009džŸ';\n    return Array.from(bytes, b => normalized === 'windows-1252' && b >= 128 && b <= 159 ? windows[b - 128] : String.fromCharCode(b)).join('');\n  }\n  throw new Error('Charset no soportado: ' + charset + '. Revisar el mensaje en Gmail.');\n}\n\nfunction decodeHeader(value) {\n  return value.replace(/=\\?([^?]+)\\?([bq])\\?([^?]*)\\?=/gi, (_, charset, mode, data) => {\n    const encoded = mode.toLowerCase() === 'b' ? data : Buffer.from(data.replace(/_/g, ' ').replace(/=([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))), 'latin1').toString('base64');\n    return decodeText(encoded, charset);\n  });\n}\n\nfunction addresses(value) {\n  // Separar comas solo fuera de comillas y de la dirección entre ángulos.\n  const parts = []; let current = '', quoted = false, depth = 0, escaped = false;\n  for (const char of decodeHeader(value)) {\n    if (char === '\"' && !escaped) quoted = !quoted;\n    if (!quoted && char === '<') depth++;\n    if (!quoted && char === '>') depth--;\n    if (char === ',' && !quoted && depth === 0) { parts.push(current); current = ''; }\n    else current += char;\n    escaped = char === '\\\\' && !escaped;\n  }\n  parts.push(current);\n  return parts.map(s => s.trim()).filter(Boolean);\n}\n\nfunction htmlToText(html) {\n  const named = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ', aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', ntilde: 'ñ' };\n  return html.replace(/<(script|style)\\b[^>]*>[\\s\\S]*?<\\/\\1>/gi, '')\n    .replace(/<(br|\\/p|\\/div|\\/li|\\/tr)\\b[^>]*>/gi, '\\n').replace(/<[^>]+>/g, '')\n    .replace(/&(#x[\\da-f]+|#\\d+|\\w+);/gi, (full, entity) => {\n      if (entity[0] !== '#') return named[entity] ?? full;\n      const number = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);\n      return number <= 0x10ffff ? String.fromCodePoint(number) : full;\n    }).trim();\n}\n\nfunction normalizeMessage(message, state) {\n  if (!message.id || !message.threadId || !message.payload) throw new Error('Mensaje Gmail incompleto');\n  const attachments = [];\n  function body(part) {\n    const disposition = header(part, 'content-disposition');\n    if (part.filename || /attachment/i.test(disposition) || part.body?.attachmentId) {\n      // No pedir /attachments: conservar únicamente metadatos, incluso de adjuntos inline.\n      if (!part.filename && /^text\\//.test(part.mimeType || '') && part.body?.attachmentId) {\n        throw new Error('Cuerpo externalizado en Gmail: revisar el mensaje; no se descargan adjuntos');\n      }\n      attachments.push({filename: decodeHeader(part.filename || ''), mime_type: part.mimeType || '',\n        size: part.body?.size || 0, attachment_id: part.body?.attachmentId || null, part_id: part.partId || null});\n      return '';\n    }\n    const children = part.parts || [];\n    if (part.mimeType === 'multipart/alternative') {\n      const plain = children.find(child => child.mimeType === 'text/plain');\n      return body(plain || children.find(child => child.mimeType === 'text/html') || children[0] || {});\n    }\n    if (children.length) return children.map(body).filter(Boolean).join('\\n\\n');\n    if (!part.body?.data || !['text/plain', 'text/html'].includes(part.mimeType)) return '';\n    const charset = /charset\\s*=\\s*\"?([^;\"\\s]+)/i.exec(header(part, 'content-type'))?.[1] || 'utf-8';\n    const decoded = decodeText(part.body.data, charset);\n    return part.mimeType === 'text/html' ? htmlToText(decoded) : decoded;\n  }\n  const text = body(message.payload);\n  const received = new Date(Number(message.internalDate));\n  if (!message.internalDate || Number.isNaN(received.getTime())) throw new Error('Fecha de recepción Gmail inválida');\n  const labels = (message.labelIds || []).map(id => {\n    if (!state.labels[id]) throw new Error('Etiqueta desconocida: ' + id + '. Reejecutar para actualizar etiquetas.');\n    return state.labels[id];\n  });\n  return {\n    external_message_id: 'gmail:' + encodeURIComponent(state.account.toLowerCase()) + ':' + message.id,\n    account_email: state.account.toLowerCase(), thread_id: message.threadId,\n    sender: addresses(header(message.payload, 'from')).join(', '),\n    recipients: addresses(header(message.payload, 'to')), cc: addresses(header(message.payload, 'cc')),\n    subject: decodeHeader(header(message.payload, 'subject')), body_text: text, labels, attachments,\n    received_at: received.toISOString(),\n    thread_url: 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(state.account) + '#all/' + message.threadId,\n  };\n}\n\nfunction afterMessage(state) {\n  state.ids.shift(); delete state.payload;\n  if (state.ids.length) state.stage = 'message';\n  else if (state.nextPageToken) { state.pageToken = state.nextPageToken; state.stage = 'list'; }\n  else state.stage = 'done';\n}\n\nfunction transition(previous, response) {\n  const state = JSON.parse(JSON.stringify(previous));\n  const status = Number(response.statusCode || 0);\n  const error = JSON.stringify(response.error || '');\n  const transient = [408, 429, 500, 502, 503, 504].includes(status) ||\n    (!status && /ECONN|ETIMEDOUT|EAI_AGAIN|timeout|socket hang up|timed out/i.test(error));\n  if (transient && state.retry < 3) { state.retry++; return state; }\n  if (status < 200 || status >= 300) {\n    throw new Error('Falló ' + state.stage + ' (HTTP ' + (status || 'sin respuesta') + '). ' +\n      (transient ? 'Agotados tres reintentos.' : 'Revisar credenciales o payload en esta ejecución; no se reintenta un error permanente.'));\n  }\n  state.retry = 0;\n  const data = response.body;\n  if (!data || typeof data !== 'object') throw new Error('Respuesta JSON inválida en ' + state.stage);\n  switch (state.stage) {\n    case 'profile':\n      if (!data.emailAddress) throw new Error('Gmail no devolvió la cuenta');\n      state.account = data.emailAddress; state.stage = 'labels'; break;\n    case 'labels': {\n      state.labels = Object.fromEntries((data.labels || []).map(label => [label.id, label.name]));\n      const match = (data.labels || []).find(label => label.name === state.label);\n      if (!match) throw new Error('Crear o corregir la etiqueta Gmail: ' + state.label);\n      state.labelId = match.id; state.stage = 'list'; break;\n    }\n    case 'list':\n      state.pages++;\n      state.ids = [...new Set((data.messages || []).map(message => message.id))];\n      state.nextPageToken = data.nextPageToken || '';\n      if (state.nextPageToken && state.seenPages.includes(state.nextPageToken)) throw new Error('Gmail repitió el token de página');\n      if (state.nextPageToken) state.seenPages.push(state.nextPageToken);\n      if (state.ids.length) state.stage = 'message'; else afterMessage(state);\n      break;\n    case 'message':\n      state.payload = normalizeMessage(data, state); state.stage = 'inbound'; break;\n    case 'inbound':\n      state.processed++; afterMessage(state); break;\n    default: throw new Error('Etapa desconocida');\n  }\n  return state;\n}\n\nreturn [{json: transition($('Preparar solicitud').item.json, $input.first().json)}];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "recibir-correo",
+      "name": "Recibir correo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        930,
+        -160
+      ],
+      "parameters": {
+        "url": "={{ $json.request_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "procesar-recibir-correo",
+      "name": "Procesar Recibir correo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1170,
+        -160
+      ],
+      "parameters": {
+        "jsCode": "// Motor puro compartido por los nodos Code y las pruebas, sin credenciales.\nfunction initialState(label = 'Evento/piloto-gmail') {\n  return { label, stage: 'profile', retry: 0, account: '', labels: {}, ids: [],\n    pageToken: '', nextPageToken: '', seenPages: [], processed: 0, pages: 0 };\n}\n\nfunction requestUrl(state) {\n  const root = 'https://gmail.googleapis.com/gmail/v1/users/me';\n  switch (state.stage) {\n    case 'profile': return root + '/profile';\n    case 'labels': return root + '/labels';\n    case 'list': return root + '/messages?maxResults=100&includeSpamTrash=true&labelIds=' +\n      encodeURIComponent(state.labelId) + (state.pageToken ? '&pageToken=' + encodeURIComponent(state.pageToken) : '');\n    case 'message': return root + '/messages/' + encodeURIComponent(state.ids[0]) + '?format=full';\n    case 'inbound': return 'http://host.docker.internal:8787/n8n/email/inbound';\n    default: throw new Error('Etapa inesperada: ' + state.stage);\n  }\n}\n\nfunction header(part, name) {\n  return (part.headers || []).filter(h => h.name.toLowerCase() === name.toLowerCase()).map(h => h.value).join(', ');\n}\n\nfunction decodeText(data, charset = 'utf-8') {\n  const bytes = Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');\n  const normalized = charset.toLowerCase();\n  if (['utf-8', 'utf8', 'us-ascii', 'ascii'].includes(normalized)) return bytes.toString('utf8');\n  if (['iso-8859-1', 'latin1', 'windows-1252'].includes(normalized)) {\n    // La mayoría del correo histórico occidental utiliza Latin-1 o Windows-1252.\n    const windows = '€\\u0081‚ƒ„…†‡ˆ‰Š‹Œ\\u008dŽ\\u008f\\u0090‘’“”•–—˜™š›œ\\u009džŸ';\n    return Array.from(bytes, b => normalized === 'windows-1252' && b >= 128 && b <= 159 ? windows[b - 128] : String.fromCharCode(b)).join('');\n  }\n  throw new Error('Charset no soportado: ' + charset + '. Revisar el mensaje en Gmail.');\n}\n\nfunction decodeHeader(value) {\n  return value.replace(/=\\?([^?]+)\\?([bq])\\?([^?]*)\\?=/gi, (_, charset, mode, data) => {\n    const encoded = mode.toLowerCase() === 'b' ? data : Buffer.from(data.replace(/_/g, ' ').replace(/=([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))), 'latin1').toString('base64');\n    return decodeText(encoded, charset);\n  });\n}\n\nfunction addresses(value) {\n  // Separar comas solo fuera de comillas y de la dirección entre ángulos.\n  const parts = []; let current = '', quoted = false, depth = 0, escaped = false;\n  for (const char of decodeHeader(value)) {\n    if (char === '\"' && !escaped) quoted = !quoted;\n    if (!quoted && char === '<') depth++;\n    if (!quoted && char === '>') depth--;\n    if (char === ',' && !quoted && depth === 0) { parts.push(current); current = ''; }\n    else current += char;\n    escaped = char === '\\\\' && !escaped;\n  }\n  parts.push(current);\n  return parts.map(s => s.trim()).filter(Boolean);\n}\n\nfunction htmlToText(html) {\n  const named = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ', aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', ntilde: 'ñ' };\n  return html.replace(/<(script|style)\\b[^>]*>[\\s\\S]*?<\\/\\1>/gi, '')\n    .replace(/<(br|\\/p|\\/div|\\/li|\\/tr)\\b[^>]*>/gi, '\\n').replace(/<[^>]+>/g, '')\n    .replace(/&(#x[\\da-f]+|#\\d+|\\w+);/gi, (full, entity) => {\n      if (entity[0] !== '#') return named[entity] ?? full;\n      const number = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : parseInt(entity.slice(1), 10);\n      return number <= 0x10ffff ? String.fromCodePoint(number) : full;\n    }).trim();\n}\n\nfunction normalizeMessage(message, state) {\n  if (!message.id || !message.threadId || !message.payload) throw new Error('Mensaje Gmail incompleto');\n  const attachments = [];\n  function body(part) {\n    const disposition = header(part, 'content-disposition');\n    if (part.filename || /attachment/i.test(disposition) || part.body?.attachmentId) {\n      // No pedir /attachments: conservar únicamente metadatos, incluso de adjuntos inline.\n      if (!part.filename && /^text\\//.test(part.mimeType || '') && part.body?.attachmentId) {\n        throw new Error('Cuerpo externalizado en Gmail: revisar el mensaje; no se descargan adjuntos');\n      }\n      attachments.push({filename: decodeHeader(part.filename || ''), mime_type: part.mimeType || '',\n        size: part.body?.size || 0, attachment_id: part.body?.attachmentId || null, part_id: part.partId || null});\n      return '';\n    }\n    const children = part.parts || [];\n    if (part.mimeType === 'multipart/alternative') {\n      const plain = children.find(child => child.mimeType === 'text/plain');\n      return body(plain || children.find(child => child.mimeType === 'text/html') || children[0] || {});\n    }\n    if (children.length) return children.map(body).filter(Boolean).join('\\n\\n');\n    if (!part.body?.data || !['text/plain', 'text/html'].includes(part.mimeType)) return '';\n    const charset = /charset\\s*=\\s*\"?([^;\"\\s]+)/i.exec(header(part, 'content-type'))?.[1] || 'utf-8';\n    const decoded = decodeText(part.body.data, charset);\n    return part.mimeType === 'text/html' ? htmlToText(decoded) : decoded;\n  }\n  const text = body(message.payload);\n  const received = new Date(Number(message.internalDate));\n  if (!message.internalDate || Number.isNaN(received.getTime())) throw new Error('Fecha de recepción Gmail inválida');\n  const labels = (message.labelIds || []).map(id => {\n    if (!state.labels[id]) throw new Error('Etiqueta desconocida: ' + id + '. Reejecutar para actualizar etiquetas.');\n    return state.labels[id];\n  });\n  return {\n    external_message_id: 'gmail:' + encodeURIComponent(state.account.toLowerCase()) + ':' + message.id,\n    account_email: state.account.toLowerCase(), thread_id: message.threadId,\n    sender: addresses(header(message.payload, 'from')).join(', '),\n    recipients: addresses(header(message.payload, 'to')), cc: addresses(header(message.payload, 'cc')),\n    subject: decodeHeader(header(message.payload, 'subject')), body_text: text, labels, attachments,\n    received_at: received.toISOString(),\n    thread_url: 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(state.account) + '#all/' + message.threadId,\n  };\n}\n\nfunction afterMessage(state) {\n  state.ids.shift(); delete state.payload;\n  if (state.ids.length) state.stage = 'message';\n  else if (state.nextPageToken) { state.pageToken = state.nextPageToken; state.stage = 'list'; }\n  else state.stage = 'done';\n}\n\nfunction transition(previous, response) {\n  const state = JSON.parse(JSON.stringify(previous));\n  const status = Number(response.statusCode || 0);\n  const error = JSON.stringify(response.error || '');\n  const transient = [408, 429, 500, 502, 503, 504].includes(status) ||\n    (!status && /ECONN|ETIMEDOUT|EAI_AGAIN|timeout|socket hang up|timed out/i.test(error));\n  if (transient && state.retry < 3) { state.retry++; return state; }\n  if (status < 200 || status >= 300) {\n    throw new Error('Falló ' + state.stage + ' (HTTP ' + (status || 'sin respuesta') + '). ' +\n      (transient ? 'Agotados tres reintentos.' : 'Revisar credenciales o payload en esta ejecución; no se reintenta un error permanente.'));\n  }\n  state.retry = 0;\n  const data = response.body;\n  if (!data || typeof data !== 'object') throw new Error('Respuesta JSON inválida en ' + state.stage);\n  switch (state.stage) {\n    case 'profile':\n      if (!data.emailAddress) throw new Error('Gmail no devolvió la cuenta');\n      state.account = data.emailAddress; state.stage = 'labels'; break;\n    case 'labels': {\n      state.labels = Object.fromEntries((data.labels || []).map(label => [label.id, label.name]));\n      const match = (data.labels || []).find(label => label.name === state.label);\n      if (!match) throw new Error('Crear o corregir la etiqueta Gmail: ' + state.label);\n      state.labelId = match.id; state.stage = 'list'; break;\n    }\n    case 'list':\n      state.pages++;\n      state.ids = [...new Set((data.messages || []).map(message => message.id))];\n      state.nextPageToken = data.nextPageToken || '';\n      if (state.nextPageToken && state.seenPages.includes(state.nextPageToken)) throw new Error('Gmail repitió el token de página');\n      if (state.nextPageToken) state.seenPages.push(state.nextPageToken);\n      if (state.ids.length) state.stage = 'message'; else afterMessage(state);\n      break;\n    case 'message':\n      state.payload = normalizeMessage(data, state); state.stage = 'inbound'; break;\n    case 'inbound':\n      state.processed++; afterMessage(state); break;\n    default: throw new Error('Etapa desconocida');\n  }\n  return state;\n}\n\nreturn [{json: transition($('Preparar solicitud').item.json, $input.first().json)}];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "reintentar-con-espera",
+      "name": "Reintentar con espera",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1410,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Reintentar con espera",
+              "leftValue": "={{ $json.retry > 0 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "esperar-dos-segundos",
+      "name": "Esperar dos segundos",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1410,
+        240
+      ],
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "webhookId": "rag-gmail-retry"
+    },
+    {
+      "id": "quedan-solicitudes",
+      "name": "Quedan solicitudes",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1650,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "Quedan solicitudes",
+              "leftValue": "={{ $json.stage !== 'done' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "resumen",
+      "name": "Resumen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{json: {cuenta: $json.account, etiqueta: $json.label, paginas: $json.pages, correos_procesados: $json.processed, resultado: 'Ingresados a revisión; los duplicados se conservan una sola vez.'}}];",
+        "mode": "runOnceForAllItems"
+      }
+    }
+  ],
+  "connections": {
+    "Gmail solo lectura": {
+      "main": [
+        [
+          {
+            "node": "Procesar Gmail solo lectura",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Procesar Gmail solo lectura": {
+      "main": [
+        [
+          {
+            "node": "Reintentar con espera",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recibir correo": {
+      "main": [
+        [
+          {
+            "node": "Procesar Recibir correo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Procesar Recibir correo": {
+      "main": [
+        [
+          {
+            "node": "Reintentar con espera",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar manualmente": {
+      "main": [
+        [
+          {
+            "node": "Configurar etiqueta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cada cinco minutos": {
+      "main": [
+        [
+          {
+            "node": "Configurar etiqueta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configurar etiqueta": {
+      "main": [
+        [
+          {
+            "node": "Preparar solicitud",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar solicitud": {
+      "main": [
+        [
+          {
+            "node": "Enviar al RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar al RAG": {
+      "main": [
+        [
+          {
+            "node": "Recibir correo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail solo lectura",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reintentar con espera": {
+      "main": [
+        [
+          {
+            "node": "Esperar dos segundos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Quedan solicitudes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Esperar dos segundos": {
+      "main": [
+        [
+          {
+            "node": "Preparar solicitud",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quedan solicitudes": {
+      "main": [
+        [
+          {
+            "node": "Preparar solicitud",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resumen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "timezone": "America/Argentina/Buenos_Aires"
+  },
+  "pinData": {}
+}

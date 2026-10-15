@@ -1,8 +1,21 @@
 # Events RAG POC
 
-Asistente de operaciones sobre el Google Drive de una empresa de eventos
-(historial de eventos, presupuestos, proveedores), con respuestas citadas,
-gráficos y una bandeja revisable para comunicaciones con proveedores.
+Espacio compartido para equipos de eventos: organiza las comunicaciones del
+evento en curso y permite investigar antecedentes históricos de Google Drive
+con respuestas citadas y gráficos. Las investigaciones pueden guardarse como
+referencia de uno o varios eventos actuales.
+
+## Espacio de trabajo
+
+- **Eventos:** crear y consultar eventos activos/archivados, revisar correo,
+  buscar conversaciones y consultar antecedentes guardados.
+- **Consultar antecedentes:** investigar el histórico. La continuidad usa la
+  respuesta elegida en esta sesión; los correos actuales no se agregan al RAG.
+- **Configuración:** sincronización y diagnóstico bajo demanda. Navegar por
+  eventos no necesita Qdrant, Neo4j ni llamadas a modelos.
+
+El recorrido, los filtros, la migración y la validación de esta entrega se
+describen en [docs/event-workspace.md](docs/event-workspace.md).
 
 > **Proyecto personal / POC.** Los datos de `sample_data/` son **ficticios**:
 > los genera `sample_data/generate_samples.py` para una empresa de eventos
@@ -26,12 +39,12 @@ gráficos y una bandeja revisable para comunicaciones con proveedores.
   progreso durante tool calls largos, y fuentes citadas como nombre de
   archivo + link a Drive (no el `source_id` crudo)
 - **Buzón de consultas** persistente (`data/queries/`), que propone usar la
-  respuesta más reciente como contexto, permite sumar otras citas y conserva
+  respuesta seleccionada por la persona como contexto, permite sumar otras citas y conserva
   feedback y tiempo de respuesta
 - **Modo Rápida / Profunda**: Rápida limita el presupuesto del agente para
   preguntas cotidianas; Profunda conserva la investigación completa para
   comparaciones amplias, tablas y gráficos
-- **Bandeja de operaciones comerciales** (`data/work_items/`): conserva
+- **Operaciones comerciales heredadas** (`data/work_items/`), fuera de la navegación actual: conserva
   mensaje entrante, evidencia, borrador, revisión de fuentes, aprobación,
   entrega y auditoría
 - Webhook autenticado para n8n (`app/webhook_server.py`): n8n ingiere y
@@ -139,7 +152,13 @@ La primera vez que uses "Resincronizar Google Drive" se va a abrir el
 navegador para el consentimiento OAuth (una sola vez, el token queda
 cacheado en `token.json`).
 
-### 7. Integración del piloto con n8n
+### 7. Integración comercial heredada con n8n
+
+Esta sección documenta contratos conservados por compatibilidad. La interfaz
+actual no presenta generación de borradores ni aprobaciones de envío.
+Mantener `ENABLE_OUTBOUND=false`: las rutas outbox/sent/failed responden 404.
+Para el piloto de comunicaciones actuales, usar el endpoint de correo de la
+sección 8, `POST /n8n/email/inbound`.
 
 Iniciá el webhook en otra terminal:
 
@@ -158,12 +177,12 @@ servidor local con `Authorization: Bearer <N8N_WEBHOOK_TOKEN>`:
   `external_message_id` después de que el canal lo aceptó.
 - `POST /n8n/outbox/{id}/failed`: registra un error recuperable de entrega.
 
-El flujo seguro es: mensaje entrante → borrador con evidencia → edición y
+El flujo comercial anterior era: mensaje entrante → borrador con evidencia → edición y
 revisión explícita de fuentes y aprobación humana en Streamlit → n8n toma el
 work item → confirmación de envío. No hay una ruta que saltee la aprobación
 humana, ni se aprueba un item sin texto de borrador.
 
-El panel "Indicadores del piloto" muestra tiempos hasta borrador/resolución,
+El módulo heredado de indicadores calcula tiempos hasta borrador/resolución,
 tasa de aprobación sin edición y detecta en la auditoría cualquier entrega
 que carezca de una aprobación previa. La corrección semántica de las fuentes
 queda deliberadamente como revisión humana, registrada antes de aprobar.
@@ -173,8 +192,22 @@ queda deliberadamente como revisión humana, registrada antes de aprobar.
 El piloto colaborativo usa correo corporativo en modo lectura: cada persona
 etiqueta los mensajes que quiere compartir como `Evento/<slug>`, n8n los
 sincroniza periódicamente y el equipo confirma el evento antes de que formen
-parte de la timeline o de un resumen. El workflow y el contrato detallado
+parte de las conversaciones confirmadas. Los resúmenes de correo quedan para
+una entrega posterior. El workflow y el contrato detallado
 están en [docs/n8n-gmail-pilot.md](docs/n8n-gmail-pilot.md).
+
+### Encontrar eventos similares
+
+En **Consultar antecedentes → Encontrar eventos similares**, describí un evento
+y agregá preferencias opcionales de tipo, asistentes y ubicación. Recupera hasta
+cinco antecedentes históricos con coincidencias, diferencias y evidencia, y permite
+guardar la investigación en un evento actual. No utiliza sus correos en la búsqueda.
+Detalles, límites y evaluación: [docs/similar-events.md](docs/similar-events.md).
+
+El piloto Gmail incluye [Docker Compose](integrations/n8n/compose.yaml) y un
+[workflow importable desactivado](integrations/n8n/gmail-pilot.workflow.json).
+La instancia local en puerto 5678 tiene su propio volumen y conserva la instalación
+anterior. La cuenta de prueba debe autorizar OAuth de solo lectura en el navegador.
 
 Para el servidor privado, copiar `.streamlit/secrets.toml.example` a
 `.streamlit/secrets.toml`, completar OAuth de Google y definir

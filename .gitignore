@@ -17,6 +17,10 @@ token.json
 !/data/work_items/.gitkeep
 /data/collaboration.sqlite3
 /data/collaboration.sqlite3-*
+/integrations/n8n/.smoke/
+/integrations/n8n/.local/
+/integrations/n8n/.smoke-*.log
+/data/evaluations/
 
 # Python
 __pycache__/

@@ -12,6 +12,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.agent.queries import load_query
+from app.config import QUERIES_DIR
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -36,6 +39,8 @@ class EventStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
+        # SQLite lower() no cubre tildes; la búsqueda debe servir en español.
+        connection.create_function("casefold", 1, lambda value: (value or "").casefold(), deterministic=True)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         return connection
@@ -90,8 +95,24 @@ class EventStore:
                     details_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS event_query_links (
+                    event_id TEXT NOT NULL REFERENCES events(id),
+                    query_id TEXT NOT NULL,
+                    saved_by TEXT NOT NULL,
+                    saved_at TEXT NOT NULL,
+                    PRIMARY KEY(event_id, query_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_event_message_state
+                    ON event_messages(event_id, association_state);
+                CREATE INDEX IF NOT EXISTS idx_message_thread
+                    ON messages(account_email, thread_id);
                 """
             )
+
+    def last_email_received_at(self) -> str | None:
+        """Fecha de incorporación local, independiente de la antigüedad del correo."""
+        with self._connect() as connection:
+            return connection.execute("SELECT MAX(created_at) FROM messages").fetchone()[0]
 
     def create_event(self, name: str) -> dict:
         """Crea un evento activo; repetir el nombre devuelve el mismo registro."""
@@ -196,17 +217,138 @@ class EventStore:
     def confirm_event_message(self, event_id: str, message_id: str, actor_email: str) -> None:
         """Convierte una sugerencia en memoria visible del evento o la reasigna."""
         with self._connect() as connection:
+            # La validación y la escritura comparten el bloqueo frente a archivo/reasignación.
+            connection.execute("BEGIN IMMEDIATE")
             event = connection.execute("SELECT id FROM events WHERE id = ? AND status = 'active'", (event_id,)).fetchone()
             message = connection.execute("SELECT id FROM messages WHERE id = ?", (message_id,)).fetchone()
             if not event or not message:
                 raise ValueError("El evento o mensaje no existe, o el evento esta archivado")
+            previous = connection.execute(
+                "SELECT event_id, association_state FROM event_messages WHERE message_id = ?", (message_id,)
+            ).fetchone()
+            if previous and previous["event_id"] == event_id and previous["association_state"] == "confirmed":
+                return
             connection.execute("DELETE FROM event_messages WHERE message_id = ?", (message_id,))
             connection.execute(
                 """INSERT INTO event_messages(event_id, message_id, association_state, reason, confirmed_by, confirmed_at, created_at)
                 VALUES (?, ?, 'confirmed', 'human_confirmation', ?, ?, ?)""",
                 (event_id, message_id, actor_email, _now(), _now()),
             )
-            self._audit(connection, event_id=event_id, message_id=message_id, actor_email=actor_email, event_name="event_confirmed")
+            self._audit(connection, event_id=event_id, message_id=message_id, actor_email=actor_email, event_name="event_confirmed", details={"previous_event_id": previous["event_id"] if previous else None})
+
+    def event_counts(self, event_id: str) -> dict:
+        with self._connect() as connection:
+            counts = dict(connection.execute(
+                "SELECT association_state, COUNT(*) FROM event_messages WHERE event_id = ? GROUP BY association_state",
+                (event_id,),
+            ).fetchall())
+            references = connection.execute("SELECT COUNT(*) FROM event_query_links WHERE event_id = ?", (event_id,)).fetchone()[0]
+        return {"confirmed": counts.get("confirmed", 0), "pending": counts.get("suggested", 0), "references": references}
+
+    @staticmethod
+    def _page_number(page: int, total: int) -> int:
+        return min(max(1, int(page)), max(1, (total + 19) // 20))
+
+    def conversation_filters(self, event_id: str) -> dict:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT m.sender, m.account_email FROM messages m
+                JOIN event_messages e ON e.message_id = m.id
+                WHERE e.event_id = ? AND e.association_state = 'confirmed'""", (event_id,),
+            ).fetchall()
+        return {"senders": sorted({r["sender"] for r in rows}), "accounts": sorted({r["account_email"] for r in rows})}
+
+    def list_conversations(
+        self, event_id: str, *, search: str = "", sender: str | None = None,
+        account_email: str | None = None, date_from: str | None = None,
+        date_to: str | None = None, page: int = 1,
+    ) -> dict:
+        """Filtra hilos por coincidencias y devuelve completos los veinte de la página.
+
+        Las fechas se comparan en UTC y los offsets se normalizan para ordenar.
+        Mantener el hilo completo evita presentar una respuesta sin su contexto.
+        """
+        conditions, params = [], [event_id]
+        if search.strip():
+            conditions.append("instr(casefold(subject || ' ' || body_text), ?) > 0")
+            params.append(search.strip().casefold())
+        for field, value in (("sender", sender), ("account_email", account_email)):
+            if value:
+                conditions.append(f"{field} = ?")
+                params.append(value)
+        for operator, value in ((">=", date_from), ("<=", date_to)):
+            if value:
+                conditions.append(f"date(received_at) {operator} date(?)")
+                params.append(value)
+        matching = " AND ".join(conditions) or "1"
+        grouped = f"""WITH scoped AS (
+            SELECT m.* FROM messages m JOIN event_messages e ON e.message_id = m.id
+            WHERE e.event_id = ? AND e.association_state = 'confirmed'
+        ), threads AS (
+            SELECT account_email, thread_id, MAX(julianday(received_at)) AS last_activity
+            FROM scoped GROUP BY account_email, thread_id
+            HAVING MAX(CASE WHEN {matching} THEN 1 ELSE 0 END) = 1
+        ) """
+        with self._connect() as connection:
+            total = connection.execute(grouped + "SELECT COUNT(*) FROM threads", params).fetchone()[0]
+            page = self._page_number(page, total)
+            threads = connection.execute(
+                grouped + "SELECT * FROM threads ORDER BY last_activity DESC, account_email, thread_id LIMIT 20 OFFSET ?",
+                [*params, (page - 1) * 20],
+            ).fetchall()
+            items = []
+            for thread in threads:
+                rows = connection.execute(
+                    """SELECT m.* FROM messages m JOIN event_messages e ON e.message_id = m.id
+                    WHERE e.event_id = ? AND e.association_state = 'confirmed'
+                    AND m.account_email = ? AND m.thread_id = ?
+                    ORDER BY julianday(m.received_at), m.id""",
+                    (event_id, thread["account_email"], thread["thread_id"]),
+                ).fetchall()
+                messages = [self._message_dict(row) for row in rows]
+                items.append({"account_email": thread["account_email"], "thread_id": thread["thread_id"], "messages": messages})
+        return {"items": items, "total": total, "page": page, "page_size": 20}
+
+    def list_pending_messages(self, event_id: str | None = None, *, page: int = 1) -> dict:
+        """Sin evento devuelve únicamente correo sin asociación, para la bandeja general."""
+        condition = "e.message_id IS NULL" if event_id is None else "e.event_id = ? AND e.association_state = 'suggested'"
+        params = [] if event_id is None else [event_id]
+        joined = f"FROM messages m LEFT JOIN event_messages e ON e.message_id = m.id WHERE {condition}"
+        with self._connect() as connection:
+            total = connection.execute("SELECT COUNT(*) " + joined, params).fetchone()[0]
+            page = self._page_number(page, total)
+            rows = connection.execute(
+                "SELECT m.* " + joined + " ORDER BY julianday(m.received_at) DESC, m.id LIMIT 20 OFFSET ?",
+                [*params, (page - 1) * 20],
+            ).fetchall()
+        return {"items": [self._message_dict(row) for row in rows], "total": total, "page": page, "page_size": 20}
+
+    def link_query(self, event_id: str, query_id: str, actor_email: str, *, queries_dir: Path = QUERIES_DIR) -> None:
+        """Vincula evidencia ya guardada, sin duplicar archivos ni modificar la respuesta."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", query_id) or load_query(query_id, queries_dir) is None:
+            raise ValueError("La consulta no existe o no está disponible")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute("SELECT id FROM events WHERE id = ? AND status = 'active'", (event_id,)).fetchone():
+                raise ValueError("Seleccioná un evento activo")
+            changed = connection.execute(
+                "INSERT OR IGNORE INTO event_query_links(event_id, query_id, saved_by, saved_at) VALUES (?, ?, ?, ?)",
+                (event_id, query_id, actor_email, _now()),
+            ).rowcount
+            if changed:
+                self._audit(connection, event_id=event_id, actor_email=actor_email, event_name="query_linked", details={"query_id": query_id})
+
+    def list_query_links(self, event_id: str) -> list[dict]:
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT * FROM event_query_links WHERE event_id = ? ORDER BY saved_at DESC, query_id", (event_id,),
+            )]
+
+    def unlink_query(self, event_id: str, query_id: str, actor_email: str) -> None:
+        with self._connect() as connection:
+            changed = connection.execute("DELETE FROM event_query_links WHERE event_id = ? AND query_id = ?", (event_id, query_id)).rowcount
+            if changed:
+                self._audit(connection, event_id=event_id, actor_email=actor_email, event_name="query_unlinked", details={"query_id": query_id})
 
     def list_event_messages(self, event_id: str) -> list[dict]:
         """Devuelve solo asociaciones confirmadas para no mezclar contexto dudoso."""
